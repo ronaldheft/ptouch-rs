@@ -311,6 +311,16 @@ static DEVICE_TABLE: &[DeviceInfo] = &[
     },
     DeviceInfo {
         vid: 0x04f9,
+        pid: 0x2202,
+        name: "PT-E510",
+        max_px: 128,
+        dpi: 180,
+        flags: DeviceFlags::P700_INIT
+            .union(DeviceFlags::USE_INFO_CMD)
+            .union(DeviceFlags::D460BT_MAGIC),
+    },
+    DeviceInfo {
+        vid: 0x04f9,
         pid: 0x2203,
         name: "PT-E560BT",
         max_px: 128,
