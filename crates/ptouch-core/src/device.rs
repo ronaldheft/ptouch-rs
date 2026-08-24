@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_device_count() {
-        assert_eq!(supported_devices().len(), 30);
+        assert_eq!(supported_devices().len(), 31);
     }
 
     #[test]
