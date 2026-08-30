@@ -406,6 +406,27 @@ mod tests {
     }
 
     #[test]
+    fn test_status_type_names_match_protocol() {
+        let expected = [
+            (0x00, "Reply to status request"),
+            (0x01, "Printing completed"),
+            (0x02, "Error occurred"),
+            (0x03, "IF mode finished"),
+            (0x04, "Power off"),
+            (0x05, "Notification"),
+            (0x06, "Phase change"),
+            (0x07, "Unknown"),
+        ];
+
+        for (status_type, name) in expected {
+            let mut buf = [0u8; 32];
+            buf[18] = status_type;
+            let status = PrinterStatus::from_bytes(&buf).unwrap();
+            assert_eq!(status.status_type_name(), name);
+        }
+    }
+
+    #[test]
     fn test_printing_phase_is_not_waiting_to_receive() {
         let mut buf = [0u8; 32];
         buf[18] = 0x06;

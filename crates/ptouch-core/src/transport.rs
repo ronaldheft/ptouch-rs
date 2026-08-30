@@ -266,9 +266,7 @@ impl PtouchDevice {
         // Request and read status
         self.get_status()?;
 
-        // Printing readiness is an application-protocol state, not a USB
-        // endpoint state. Ask the printer to emit phase changes so every
-        // subsequent page can wait for an explicit receiving phase.
+        // Enable the phase changes used by the post-print readiness handshake.
         self.send(&protocol::cmd_auto_status_notification(true))?;
 
         self.initialized = true;
@@ -302,14 +300,22 @@ impl PtouchDevice {
         self.send(&protocol::cmd_status_request())?;
 
         let mut buf = [0u8; STATUS_PACKET_SIZE];
-        let mut read = 0usize;
+        let mut frames = StatusFrameBuffer::new();
+        let mut response = None;
 
         // Retry loop: sleep then read
         for attempt in 0..STATUS_MAX_RETRIES {
             std::thread::sleep(STATUS_RETRY_DELAY);
 
             match self.handle.read_bulk(self.ep_in, &mut buf, USB_TIMEOUT) {
-                Ok(n) => read = n,
+                Ok(0) => {
+                    debug!("Empty status read (attempt {})", attempt + 1);
+                    continue;
+                }
+                Ok(n) => {
+                    frames.push(&buf[..n]);
+                    response = frames.pop();
+                }
                 Err(rusb::Error::Timeout) => {
                     debug!("Status read timeout (attempt {})", attempt + 1);
                     continue;
@@ -317,36 +323,33 @@ impl PtouchDevice {
                 Err(e) => return Err(PtouchError::UsbError(e)),
             }
 
-            if read >= STATUS_PACKET_SIZE {
+            if response.is_some() {
                 break;
             }
             debug!(
                 "Short status read ({} bytes, attempt {})",
-                read,
+                frames.len(),
                 attempt + 1
             );
         }
 
-        if read < STATUS_PACKET_SIZE {
+        let Some(response) = response else {
             // Flush junk data before returning error
             self.flush_input();
             return Err(PtouchError::StatusError(format!(
                 "Status packet too short: {} bytes (expected {})",
-                read, STATUS_PACKET_SIZE
+                frames.len(),
+                STATUS_PACKET_SIZE
             )));
-        }
+        };
 
-        let status = PrinterStatus::from_bytes(&buf)
-            .ok_or_else(|| PtouchError::StatusError("Failed to parse status packet".to_string()))?;
-
-        // Validate header bytes (print_head_mark=0x80, size=0x20)
-        if status.print_head_mark != 0x80 || status.size != 0x20 {
-            self.flush_input();
-            return Err(PtouchError::StatusError(format!(
-                "Invalid status header: mark={:#04x} size={:#04x}",
-                status.print_head_mark, status.size
-            )));
-        }
+        let status = match parse_status_packet(&response, "Invalid status header") {
+            Ok(status) => status,
+            Err(error) => {
+                self.flush_input();
+                return Err(error);
+            }
+        };
 
         debug!(
             "Status: type={}, media_width={}mm, media_type={}, tape_color={}, text_color={}",
@@ -417,17 +420,8 @@ impl PtouchDevice {
             quality,
         };
 
-        for chunk in protocol::build_print_job(lines, self.dev_info.flags, &opts) {
-            self.send(&chunk)?;
-        }
-
-        // Brother sends several automatic status packets for a page. Keep the
-        // USB interface claimed until the final "Waiting to receive" phase so
-        // callers cannot start the next job while printer firmware is busy.
-        let status = receive_print_status(|buf, timeout| self.receive_with_timeout(buf, timeout))?;
-        self.status = Some(status);
-
-        Ok(())
+        let job = protocol::build_print_job(lines, self.dev_info.flags, &opts);
+        self.send_job_and_wait_until_ready(job)
     }
 
     /// Feed tape forward and cut.
@@ -447,11 +441,20 @@ impl PtouchDevice {
             ..protocol::JobOptions::default()
         };
 
-        for chunk in protocol::build_print_job(&lines, self.dev_info.flags, &opts) {
+        let job = protocol::build_print_job(&lines, self.dev_info.flags, &opts);
+        self.send_job_and_wait_until_ready(job)?;
+
+        info!("Feed and cut");
+        Ok(())
+    }
+
+    fn send_job_and_wait_until_ready(&mut self, job: Vec<Vec<u8>>) -> Result<()> {
+        for chunk in job {
             self.send(&chunk)?;
         }
 
-        info!("Feed and cut");
+        let status = receive_print_status(|buf, timeout| self.receive_with_timeout(buf, timeout))?;
+        self.status = Some(status);
         Ok(())
     }
 
@@ -476,8 +479,7 @@ where
     F: FnMut(&mut [u8], Duration) -> Result<usize>,
 {
     let started = Instant::now();
-    let mut pending = Vec::with_capacity(STATUS_PACKET_SIZE * 2);
-    let mut lifecycle = PrintStatusLifecycle::default();
+    let mut frames = StatusFrameBuffer::new();
 
     loop {
         let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
@@ -510,29 +512,20 @@ where
             continue;
         }
 
-        pending.extend_from_slice(&transfer[..read]);
-        if pending.len() < STATUS_PACKET_SIZE {
+        frames.push(&transfer[..read]);
+        if frames.len() < STATUS_PACKET_SIZE {
             debug!(
                 "Accumulated {} of {} print-status bytes",
-                pending.len(),
+                frames.len(),
                 STATUS_PACKET_SIZE
             );
             continue;
         }
 
-        let mut response_buf = [0u8; STATUS_PACKET_SIZE];
-        response_buf.copy_from_slice(&pending[..STATUS_PACKET_SIZE]);
-        pending.drain(..STATUS_PACKET_SIZE);
-
-        let status = PrinterStatus::from_bytes(&response_buf)
-            .ok_or_else(|| PtouchError::StatusError("Failed to parse status packet".to_string()))?;
-
-        if status.print_head_mark != 0x80 || status.size != 0x20 {
-            return Err(PtouchError::StatusError(format!(
-                "Invalid status header after print: mark={:#04x} size={:#04x}",
-                status.print_head_mark, status.size
-            )));
-        }
+        let Some(response) = frames.pop() else {
+            continue;
+        };
+        let status = parse_status_packet(&response, "Invalid status header after print")?;
 
         debug!(
             "Print status: type={}, phase_type={:#04x}, phase={:#04x}{:02x}",
@@ -542,57 +535,76 @@ where
             status.phase_number_lo
         );
 
-        if lifecycle.observe(&status)? {
+        if print_status_is_ready(&status)? {
             debug!("Printer is ready to receive the next page");
             return Ok(status);
         }
     }
 }
 
-/// State accumulated while consuming automatic status packets for one page.
-///
-/// A successful USB write only means the host controller accepted bytes. A
-/// `Printing completed` packet is also not sufficient: Brother documents that
-/// it may precede the end of the printer's feed/cut operation. The receiving
-/// phase is the protocol-level handoff that permits the next page.
-#[derive(Debug, Default)]
-struct PrintStatusLifecycle {
-    saw_printing: bool,
-    saw_completed: bool,
+struct StatusFrameBuffer {
+    pending: Vec<u8>,
 }
 
-impl PrintStatusLifecycle {
-    /// Observe a status packet. Returns true only when the printer explicitly
-    /// reports that it can receive the next page.
-    fn observe(&mut self, status: &PrinterStatus) -> Result<bool> {
-        if status.has_error() || status.status_type == 0x02 {
-            let description = if status.has_error() {
-                status.error_description()
-            } else {
-                "Printer reported an unspecified error".to_string()
-            };
-            return Err(PtouchError::StatusError(description));
+impl StatusFrameBuffer {
+    fn new() -> Self {
+        Self {
+            pending: Vec::with_capacity(STATUS_PACKET_SIZE * 2),
         }
-
-        if status.status_type == 0x04 {
-            return Err(PtouchError::StatusError("Printer turned off".to_string()));
-        }
-
-        if status.status_type == 0x06 && status.phase_type == 0x01 {
-            self.saw_printing = true;
-        } else if status.status_type == 0x01 {
-            self.saw_completed = true;
-        }
-
-        let ready = status.is_waiting_to_receive();
-        if ready {
-            debug!(
-                "Receiving phase observed (printing={}, completed={})",
-                self.saw_printing, self.saw_completed
-            );
-        }
-        Ok(ready)
     }
+
+    fn push(&mut self, bytes: &[u8]) {
+        self.pending.extend_from_slice(bytes);
+    }
+
+    fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    fn pop(&mut self) -> Option<[u8; STATUS_PACKET_SIZE]> {
+        if self.pending.len() < STATUS_PACKET_SIZE {
+            return None;
+        }
+
+        let mut frame = [0u8; STATUS_PACKET_SIZE];
+        frame.copy_from_slice(&self.pending[..STATUS_PACKET_SIZE]);
+        self.pending.drain(..STATUS_PACKET_SIZE);
+        Some(frame)
+    }
+}
+
+fn parse_status_packet(
+    response: &[u8; STATUS_PACKET_SIZE],
+    invalid_header_message: &str,
+) -> Result<PrinterStatus> {
+    let status = PrinterStatus::from_bytes(response)
+        .ok_or_else(|| PtouchError::StatusError("Failed to parse status packet".to_string()))?;
+
+    if status.print_head_mark != 0x80 || status.size != 0x20 {
+        return Err(PtouchError::StatusError(format!(
+            "{}: mark={:#04x} size={:#04x}",
+            invalid_header_message, status.print_head_mark, status.size
+        )));
+    }
+
+    Ok(status)
+}
+
+fn print_status_is_ready(status: &PrinterStatus) -> Result<bool> {
+    if status.has_error() || status.status_type == 0x02 {
+        let description = if status.has_error() {
+            status.error_description()
+        } else {
+            "Printer reported an unspecified error".to_string()
+        };
+        return Err(PtouchError::StatusError(description));
+    }
+
+    if status.status_type == 0x04 {
+        return Err(PtouchError::StatusError("Printer turned off".to_string()));
+    }
+
+    Ok(status.is_waiting_to_receive())
 }
 
 /// Find the bulk IN and OUT endpoints for the printer interface.
@@ -749,6 +761,23 @@ mod tests {
 
         assert!(status.is_waiting_to_receive());
         assert!(transfers.is_empty());
+    }
+
+    #[test]
+    fn status_frame_buffer_preserves_partial_next_packet() {
+        let first = status_packet(0x01, 0x00);
+        let second = status_packet(0x06, 0x00);
+        let mut frames = StatusFrameBuffer::new();
+
+        frames.push(&first[..9]);
+        frames.push(&[first[9..].as_ref(), second[..7].as_ref()].concat());
+
+        assert_eq!(frames.pop(), Some(first));
+        assert_eq!(frames.len(), 7);
+
+        frames.push(&second[7..]);
+        assert_eq!(frames.pop(), Some(second));
+        assert_eq!(frames.len(), 0);
     }
 
     #[test]
