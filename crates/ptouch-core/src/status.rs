@@ -252,20 +252,29 @@ impl PrinterStatus {
         text_color_name(self.text_color)
     }
 
-    /// Status type: 0x00 = reply to status request, 0x01 = printing completed,
-    /// 0x02 = error occurred, 0x04 = IF mode finished, 0x05 = power off,
-    /// 0x06 = notification, 0x07 = phase change.
+    /// Status type as defined by Brother's raster command protocol.
     pub fn status_type_name(&self) -> &'static str {
         match self.status_type {
             0x00 => "Reply to status request",
             0x01 => "Printing completed",
             0x02 => "Error occurred",
-            0x04 => "IF mode finished",
-            0x05 => "Power off",
-            0x06 => "Notification",
-            0x07 => "Phase change",
+            0x03 => "IF mode finished",
+            0x04 => "Power off",
+            0x05 => "Notification",
+            0x06 => "Phase change",
             _ => "Unknown",
         }
+    }
+
+    /// Returns true when the printer can receive the next page.
+    ///
+    /// Brother reports this as a phase change to the editing state with
+    /// phase number zero ("Waiting to receive").
+    pub fn is_waiting_to_receive(&self) -> bool {
+        self.status_type == 0x06
+            && self.phase_type == 0x00
+            && self.phase_number_hi == 0x00
+            && self.phase_number_lo == 0x00
     }
 }
 
@@ -384,5 +393,25 @@ mod tests {
         }
         let status = PrinterStatus::from_bytes(&buf).unwrap();
         assert_eq!(status.to_bytes(), buf);
+    }
+
+    #[test]
+    fn test_phase_change_status_and_waiting_to_receive() {
+        let mut buf = [0u8; 32];
+        buf[18] = 0x06;
+        let status = PrinterStatus::from_bytes(&buf).unwrap();
+
+        assert_eq!(status.status_type_name(), "Phase change");
+        assert!(status.is_waiting_to_receive());
+    }
+
+    #[test]
+    fn test_printing_phase_is_not_waiting_to_receive() {
+        let mut buf = [0u8; 32];
+        buf[18] = 0x06;
+        buf[19] = 0x01;
+        let status = PrinterStatus::from_bytes(&buf).unwrap();
+
+        assert!(!status.is_waiting_to_receive());
     }
 }

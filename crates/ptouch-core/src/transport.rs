@@ -404,26 +404,11 @@ impl PtouchDevice {
             self.send(&chunk)?;
         }
 
-        // Wait for printing completed status
-        let mut response_buf = [0u8; STATUS_PACKET_SIZE];
-        match self.receive(&mut response_buf) {
-            Ok(n) if n >= STATUS_PACKET_SIZE => {
-                if let Some(status) = PrinterStatus::from_bytes(&response_buf) {
-                    if status.has_error() {
-                        return Err(PtouchError::StatusError(status.error_description()));
-                    }
-                    debug!("Print completed: status_type={}", status.status_type_name());
-                    self.status = Some(status);
-                }
-            }
-            Ok(n) => {
-                debug!("Short status response after print: {} bytes", n);
-            }
-            Err(PtouchError::Timeout) => {
-                debug!("Timeout waiting for print completion status");
-            }
-            Err(e) => return Err(e),
-        }
+        // Brother sends several automatic status packets for a page. Keep the
+        // USB interface claimed until the final "Waiting to receive" phase so
+        // callers cannot start the next job while printer firmware is busy.
+        let status = receive_print_status(|buf| self.receive(buf))?;
+        self.status = Some(status);
 
         Ok(())
     }
@@ -461,6 +446,60 @@ impl PtouchDevice {
     }
 }
 
+/// Receive the printer's automatic status after a print command.
+fn receive_print_status<F>(mut receive: F) -> Result<PrinterStatus>
+where
+    F: FnMut(&mut [u8]) -> Result<usize>,
+{
+    loop {
+        let mut response_buf = [0u8; STATUS_PACKET_SIZE];
+        let read = receive(&mut response_buf)?;
+
+        if read < STATUS_PACKET_SIZE {
+            return Err(PtouchError::StatusError(format!(
+                "Status packet too short after print: {} bytes (expected {})",
+                read, STATUS_PACKET_SIZE
+            )));
+        }
+
+        let status = PrinterStatus::from_bytes(&response_buf)
+            .ok_or_else(|| PtouchError::StatusError("Failed to parse status packet".to_string()))?;
+
+        if status.print_head_mark != 0x80 || status.size != 0x20 {
+            return Err(PtouchError::StatusError(format!(
+                "Invalid status header after print: mark={:#04x} size={:#04x}",
+                status.print_head_mark, status.size
+            )));
+        }
+
+        debug!(
+            "Print status: type={}, phase_type={:#04x}, phase={:#04x}{:02x}",
+            status.status_type_name(),
+            status.phase_type,
+            status.phase_number_hi,
+            status.phase_number_lo
+        );
+
+        if status.has_error() || status.status_type == 0x02 {
+            let description = if status.has_error() {
+                status.error_description()
+            } else {
+                "Printer reported an unspecified error".to_string()
+            };
+            return Err(PtouchError::StatusError(description));
+        }
+
+        if status.status_type == 0x04 {
+            return Err(PtouchError::StatusError("Printer turned off".to_string()));
+        }
+
+        if status.is_waiting_to_receive() {
+            debug!("Printer is ready to receive the next page");
+            return Ok(status);
+        }
+    }
+}
+
 /// Find the bulk IN and OUT endpoints for the printer interface.
 fn find_bulk_endpoints(handle: &DeviceHandle<Context>) -> Result<(u8, u8)> {
     let device = handle.device();
@@ -493,5 +532,80 @@ fn find_bulk_endpoints(handle: &DeviceHandle<Context>) -> Result<(u8, u8)> {
     match (ep_out, ep_in) {
         (Some(out), Some(inp)) => Ok((out, inp)),
         _ => Err(PtouchError::DeviceNotFound),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use super::*;
+
+    fn status_packet(status_type: u8, phase_type: u8) -> [u8; STATUS_PACKET_SIZE] {
+        let mut packet = [0u8; STATUS_PACKET_SIZE];
+        packet[0] = 0x80;
+        packet[1] = 0x20;
+        packet[18] = status_type;
+        packet[19] = phase_type;
+        packet
+    }
+
+    #[test]
+    fn print_status_waits_until_reception_is_possible() {
+        let mut packets = VecDeque::from([
+            status_packet(0x06, 0x01),
+            status_packet(0x01, 0x00),
+            status_packet(0x06, 0x00),
+        ]);
+
+        let status = receive_print_status(|buf| {
+            let packet = packets.pop_front().ok_or(PtouchError::Timeout)?;
+            buf.copy_from_slice(&packet);
+            Ok(packet.len())
+        })
+        .unwrap();
+
+        assert_eq!(status.status_type, 0x06);
+        assert_eq!(status.phase_type, 0x00);
+        assert!(packets.is_empty());
+    }
+
+    #[test]
+    fn print_status_does_not_accept_printing_completed_as_ready() {
+        let mut packets = VecDeque::from([status_packet(0x01, 0x00)]);
+
+        let result = receive_print_status(|buf| {
+            let packet = packets.pop_front().ok_or(PtouchError::Timeout)?;
+            buf.copy_from_slice(&packet);
+            Ok(packet.len())
+        });
+
+        assert!(matches!(result, Err(PtouchError::Timeout)));
+    }
+
+    #[test]
+    fn print_status_propagates_printer_errors() {
+        let mut packet = status_packet(0x02, 0x00);
+        packet[8] = 0x04;
+
+        let result = receive_print_status(|buf| {
+            buf.copy_from_slice(&packet);
+            Ok(packet.len())
+        });
+
+        assert!(matches!(
+            result,
+            Err(PtouchError::StatusError(message)) if message == "Cutter jam"
+        ));
+    }
+
+    #[test]
+    fn print_status_rejects_short_packets() {
+        let result = receive_print_status(|_| Ok(12));
+
+        assert!(matches!(
+            result,
+            Err(PtouchError::StatusError(message)) if message.contains("too short")
+        ));
     }
 }
