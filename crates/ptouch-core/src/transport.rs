@@ -10,7 +10,7 @@
 //! Provides the [`PtouchDevice`] struct for opening, initializing, and
 //! communicating with a P-Touch printer over USB.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
 use rusb::{Context, DeviceHandle, UsbContext};
@@ -32,6 +32,9 @@ const STATUS_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// Maximum number of status read retries.
 const STATUS_MAX_RETRIES: usize = 10;
+
+/// Maximum time to process automatic status transfers after a print command.
+const PRINT_STATUS_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// USB interface number for P-Touch printers.
 const USB_INTERFACE: u8 = 0;
@@ -451,16 +454,52 @@ fn receive_print_status<F>(mut receive: F) -> Result<PrinterStatus>
 where
     F: FnMut(&mut [u8]) -> Result<usize>,
 {
-    loop {
-        let mut response_buf = [0u8; STATUS_PACKET_SIZE];
-        let read = receive(&mut response_buf)?;
+    receive_print_status_with_timeout(&mut receive, PRINT_STATUS_TIMEOUT)
+}
 
-        if read < STATUS_PACKET_SIZE {
+fn receive_print_status_with_timeout<F>(mut receive: F, timeout: Duration) -> Result<PrinterStatus>
+where
+    F: FnMut(&mut [u8]) -> Result<usize>,
+{
+    let started = Instant::now();
+    let mut pending = Vec::with_capacity(STATUS_PACKET_SIZE * 2);
+
+    loop {
+        if started.elapsed() >= timeout {
+            return Err(PtouchError::Timeout);
+        }
+
+        let mut transfer = [0u8; STATUS_PACKET_SIZE];
+        let read = receive(&mut transfer)?;
+
+        if read > transfer.len() {
             return Err(PtouchError::StatusError(format!(
-                "Status packet too short after print: {} bytes (expected {})",
-                read, STATUS_PACKET_SIZE
+                "USB read reported {} bytes for a {}-byte buffer",
+                read,
+                transfer.len()
             )));
         }
+
+        // A successful zero-byte bulk transfer is USB framing, not a Brother
+        // status packet. Keep waiting within the overall deadline.
+        if read == 0 {
+            debug!("Ignoring zero-length USB transfer after print");
+            continue;
+        }
+
+        pending.extend_from_slice(&transfer[..read]);
+        if pending.len() < STATUS_PACKET_SIZE {
+            debug!(
+                "Accumulated {} of {} print-status bytes",
+                pending.len(),
+                STATUS_PACKET_SIZE
+            );
+            continue;
+        }
+
+        let mut response_buf = [0u8; STATUS_PACKET_SIZE];
+        response_buf.copy_from_slice(&pending[..STATUS_PACKET_SIZE]);
+        pending.drain(..STATUS_PACKET_SIZE);
 
         let status = PrinterStatus::from_bytes(&response_buf)
             .ok_or_else(|| PtouchError::StatusError("Failed to parse status packet".to_string()))?;
@@ -600,12 +639,60 @@ mod tests {
     }
 
     #[test]
-    fn print_status_rejects_short_packets() {
-        let result = receive_print_status(|_| Ok(12));
+    fn print_status_times_out_after_incomplete_packet() {
+        let mut transfers = VecDeque::from([Ok(vec![0u8; 12]), Err(PtouchError::Timeout)]);
 
-        assert!(matches!(
-            result,
-            Err(PtouchError::StatusError(message)) if message.contains("too short")
-        ));
+        let result = receive_print_status(|buf| match transfers.pop_front().unwrap() {
+            Ok(transfer) => {
+                buf[..transfer.len()].copy_from_slice(&transfer);
+                Ok(transfer.len())
+            }
+            Err(error) => Err(error),
+        });
+
+        assert!(matches!(result, Err(PtouchError::Timeout)));
+    }
+
+    #[test]
+    fn print_status_ignores_zero_length_usb_transfers() {
+        let mut transfers = VecDeque::from([
+            Vec::new(),
+            status_packet(0x06, 0x01).to_vec(),
+            status_packet(0x01, 0x00).to_vec(),
+            status_packet(0x06, 0x00).to_vec(),
+        ]);
+
+        let status = receive_print_status(|buf| {
+            let transfer = transfers.pop_front().ok_or(PtouchError::Timeout)?;
+            buf[..transfer.len()].copy_from_slice(&transfer);
+            Ok(transfer.len())
+        })
+        .unwrap();
+
+        assert!(status.is_waiting_to_receive());
+        assert!(transfers.is_empty());
+    }
+
+    #[test]
+    fn print_status_accumulates_fragmented_packets() {
+        let ready = status_packet(0x06, 0x00);
+        let mut transfers = VecDeque::from([ready[..11].to_vec(), ready[11..].to_vec()]);
+
+        let status = receive_print_status(|buf| {
+            let transfer = transfers.pop_front().ok_or(PtouchError::Timeout)?;
+            buf[..transfer.len()].copy_from_slice(&transfer);
+            Ok(transfer.len())
+        })
+        .unwrap();
+
+        assert!(status.is_waiting_to_receive());
+        assert!(transfers.is_empty());
+    }
+
+    #[test]
+    fn print_status_has_an_overall_deadline() {
+        let result = receive_print_status_with_timeout(|_| Ok(0), Duration::ZERO);
+
+        assert!(matches!(result, Err(PtouchError::Timeout)));
     }
 }
