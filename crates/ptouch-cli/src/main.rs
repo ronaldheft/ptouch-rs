@@ -394,6 +394,12 @@ fn format_flags(dev: &DeviceInfo) -> String {
     if dev.flags.contains(DeviceFlags::D460BT_MAGIC) {
         parts.push("d460bt");
     }
+    if dev.flags.contains(DeviceFlags::WAIT_FOR_RECEIVE_READY) {
+        parts.push("wait-ready");
+    }
+    if dev.flags.contains(DeviceFlags::AUTO_STATUS_NOTIFICATION) {
+        parts.push("auto-status");
+    }
     if parts.is_empty() {
         String::new()
     } else {

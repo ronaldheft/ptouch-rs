@@ -38,6 +38,10 @@ bitflags! {
         /// Device selects print quality via the legacy ESC i c command
         /// (PT-9500PC generation of 360 dpi printers).
         const LEGACY_HIRES    = 1 << 7;
+        /// Device reports a phase change when it is ready for the next job.
+        const WAIT_FOR_RECEIVE_READY = 1 << 8;
+        /// Device supports ESC i ! for configuring automatic status notification.
+        const AUTO_STATUS_NOTIFICATION = 1 << 9;
     }
 }
 
@@ -191,7 +195,9 @@ static DEVICE_TABLE: &[DeviceInfo] = &[
         name: "PT-H500",
         max_px: 128,
         dpi: 180,
-        flags: DeviceFlags::RASTER_PACKBITS.union(DeviceFlags::HAS_PRECUT),
+        flags: DeviceFlags::RASTER_PACKBITS
+            .union(DeviceFlags::HAS_PRECUT)
+            .union(DeviceFlags::WAIT_FOR_RECEIVE_READY),
     },
     DeviceInfo {
         vid: 0x04f9,
@@ -199,7 +205,7 @@ static DEVICE_TABLE: &[DeviceInfo] = &[
         name: "PT-E500",
         max_px: 128,
         dpi: 180,
-        flags: DeviceFlags::RASTER_PACKBITS,
+        flags: DeviceFlags::RASTER_PACKBITS.union(DeviceFlags::WAIT_FOR_RECEIVE_READY),
     },
     DeviceInfo {
         vid: 0x04f9,
@@ -217,7 +223,8 @@ static DEVICE_TABLE: &[DeviceInfo] = &[
         dpi: 180,
         flags: DeviceFlags::RASTER_PACKBITS
             .union(DeviceFlags::P700_INIT)
-            .union(DeviceFlags::HAS_PRECUT),
+            .union(DeviceFlags::HAS_PRECUT)
+            .union(DeviceFlags::WAIT_FOR_RECEIVE_READY),
     },
     DeviceInfo {
         vid: 0x04f9,
@@ -225,7 +232,10 @@ static DEVICE_TABLE: &[DeviceInfo] = &[
         name: "PT-P750W",
         max_px: 128,
         dpi: 180,
-        flags: DeviceFlags::RASTER_PACKBITS.union(DeviceFlags::P700_INIT),
+        flags: DeviceFlags::RASTER_PACKBITS
+            .union(DeviceFlags::P700_INIT)
+            .union(DeviceFlags::WAIT_FOR_RECEIVE_READY)
+            .union(DeviceFlags::AUTO_STATUS_NOTIFICATION),
     },
     DeviceInfo {
         vid: 0x04f9,
@@ -297,7 +307,10 @@ static DEVICE_TABLE: &[DeviceInfo] = &[
         name: "PT-P710BT",
         max_px: 128,
         dpi: 180,
-        flags: DeviceFlags::RASTER_PACKBITS.union(DeviceFlags::HAS_PRECUT),
+        flags: DeviceFlags::RASTER_PACKBITS
+            .union(DeviceFlags::HAS_PRECUT)
+            .union(DeviceFlags::WAIT_FOR_RECEIVE_READY)
+            .union(DeviceFlags::AUTO_STATUS_NOTIFICATION),
     },
     DeviceInfo {
         vid: 0x04f9,
@@ -394,5 +407,33 @@ mod tests {
         assert!(dev.flags.contains(DeviceFlags::P700_INIT));
         assert!(dev.flags.contains(DeviceFlags::USE_INFO_CMD));
         assert!(dev.flags.contains(DeviceFlags::HAS_PRECUT));
+    }
+
+    #[test]
+    fn readiness_wait_is_limited_to_documented_models() {
+        let opted_in_pids = [0x205e, 0x205f, 0x2061, 0x2062, 0x20af];
+
+        for dev in supported_devices() {
+            assert_eq!(
+                dev.flags.contains(DeviceFlags::WAIT_FOR_RECEIVE_READY),
+                opted_in_pids.contains(&dev.pid),
+                "unexpected readiness-wait capability for {}",
+                dev.name
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_status_command_is_limited_to_documented_models() {
+        let opted_in_pids = [0x2062, 0x20af];
+
+        for dev in supported_devices() {
+            assert_eq!(
+                dev.flags.contains(DeviceFlags::AUTO_STATUS_NOTIFICATION),
+                opted_in_pids.contains(&dev.pid),
+                "unexpected automatic-status capability for {}",
+                dev.name
+            );
+        }
     }
 }

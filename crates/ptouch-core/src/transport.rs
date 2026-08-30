@@ -266,8 +266,14 @@ impl PtouchDevice {
         // Request and read status
         self.get_status()?;
 
-        // Enable the phase changes used by the post-print readiness handshake.
-        self.send(&protocol::cmd_auto_status_notification(true))?;
+        if self
+            .dev_info
+            .flags
+            .contains(DeviceFlags::AUTO_STATUS_NOTIFICATION)
+        {
+            // Enable the phase changes used by the post-print readiness handshake.
+            self.send(&protocol::cmd_auto_status_notification(true))?;
+        }
 
         self.initialized = true;
         info!(
@@ -421,7 +427,17 @@ impl PtouchDevice {
         };
 
         let job = protocol::build_print_job(lines, self.dev_info.flags, &opts);
-        self.send_job_and_wait_until_ready(job)
+        self.send_job(job)?;
+
+        if self
+            .dev_info
+            .flags
+            .contains(DeviceFlags::WAIT_FOR_RECEIVE_READY)
+        {
+            self.wait_until_ready()
+        } else {
+            self.receive_print_completion()
+        }
     }
 
     /// Feed tape forward and cut.
@@ -442,19 +458,57 @@ impl PtouchDevice {
         };
 
         let job = protocol::build_print_job(&lines, self.dev_info.flags, &opts);
-        self.send_job_and_wait_until_ready(job)?;
+        self.send_job(job)?;
+
+        if self
+            .dev_info
+            .flags
+            .contains(DeviceFlags::WAIT_FOR_RECEIVE_READY)
+        {
+            self.wait_until_ready()?;
+        }
 
         info!("Feed and cut");
         Ok(())
     }
 
-    fn send_job_and_wait_until_ready(&mut self, job: Vec<Vec<u8>>) -> Result<()> {
+    fn send_job(&self, job: Vec<Vec<u8>>) -> Result<()> {
         for chunk in job {
             self.send(&chunk)?;
         }
 
+        Ok(())
+    }
+
+    fn wait_until_ready(&mut self) -> Result<()> {
         let status = receive_print_status(|buf, timeout| self.receive_with_timeout(buf, timeout))?;
         self.status = Some(status);
+        Ok(())
+    }
+
+    /// Preserve the original best-effort completion read for models whose
+    /// readiness lifecycle has not been documented or tested.
+    fn receive_print_completion(&mut self) -> Result<()> {
+        let mut response = [0u8; STATUS_PACKET_SIZE];
+        match self.receive(&mut response) {
+            Ok(n) if n >= STATUS_PACKET_SIZE => {
+                if let Some(status) = PrinterStatus::from_bytes(&response) {
+                    if status.has_error() {
+                        return Err(PtouchError::StatusError(status.error_description()));
+                    }
+                    debug!("Print completed: status_type={}", status.status_type_name());
+                    self.status = Some(status);
+                }
+            }
+            Ok(n) => {
+                debug!("Short status response after print: {} bytes", n);
+            }
+            Err(PtouchError::Timeout) => {
+                debug!("Timeout waiting for print completion status");
+            }
+            Err(error) => return Err(error),
+        }
+
         Ok(())
     }
 
