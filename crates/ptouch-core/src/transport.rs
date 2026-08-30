@@ -36,6 +36,10 @@ const STATUS_MAX_RETRIES: usize = 10;
 /// Maximum time to process automatic status transfers after a print command.
 const PRINT_STATUS_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Bound each USB read so transient silence cannot consume the whole print
+/// lifecycle deadline in a single transfer.
+const PRINT_STATUS_POLL_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// USB interface number for P-Touch printers.
 const USB_INTERFACE: u8 = 0;
 
@@ -209,9 +213,14 @@ impl PtouchDevice {
     ///
     /// Returns the number of bytes actually read into `buf`.
     pub fn receive(&self, buf: &mut [u8]) -> Result<usize> {
+        self.receive_with_timeout(buf, USB_TIMEOUT)
+    }
+
+    /// Receive raw bytes with a caller-provided timeout.
+    fn receive_with_timeout(&self, buf: &mut [u8], timeout: Duration) -> Result<usize> {
         let read = self
             .handle
-            .read_bulk(self.ep_in, buf, USB_TIMEOUT)
+            .read_bulk(self.ep_in, buf, timeout)
             .map_err(|e| {
                 if e == rusb::Error::Timeout {
                     PtouchError::Timeout
@@ -256,6 +265,11 @@ impl PtouchDevice {
 
         // Request and read status
         self.get_status()?;
+
+        // Printing readiness is an application-protocol state, not a USB
+        // endpoint state. Ask the printer to emit phase changes so every
+        // subsequent page can wait for an explicit receiving phase.
+        self.send(&protocol::cmd_auto_status_notification(true))?;
 
         self.initialized = true;
         info!(
@@ -410,7 +424,7 @@ impl PtouchDevice {
         // Brother sends several automatic status packets for a page. Keep the
         // USB interface claimed until the final "Waiting to receive" phase so
         // callers cannot start the next job while printer firmware is busy.
-        let status = receive_print_status(|buf| self.receive(buf))?;
+        let status = receive_print_status(|buf, timeout| self.receive_with_timeout(buf, timeout))?;
         self.status = Some(status);
 
         Ok(())
@@ -452,25 +466,34 @@ impl PtouchDevice {
 /// Receive the printer's automatic status after a print command.
 fn receive_print_status<F>(mut receive: F) -> Result<PrinterStatus>
 where
-    F: FnMut(&mut [u8]) -> Result<usize>,
+    F: FnMut(&mut [u8], Duration) -> Result<usize>,
 {
     receive_print_status_with_timeout(&mut receive, PRINT_STATUS_TIMEOUT)
 }
 
 fn receive_print_status_with_timeout<F>(mut receive: F, timeout: Duration) -> Result<PrinterStatus>
 where
-    F: FnMut(&mut [u8]) -> Result<usize>,
+    F: FnMut(&mut [u8], Duration) -> Result<usize>,
 {
     let started = Instant::now();
     let mut pending = Vec::with_capacity(STATUS_PACKET_SIZE * 2);
+    let mut lifecycle = PrintStatusLifecycle::default();
 
     loop {
-        if started.elapsed() >= timeout {
+        let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
             return Err(PtouchError::Timeout);
-        }
+        };
 
         let mut transfer = [0u8; STATUS_PACKET_SIZE];
-        let read = receive(&mut transfer)?;
+        let read_timeout = remaining.min(PRINT_STATUS_POLL_TIMEOUT);
+        let read = match receive(&mut transfer, read_timeout) {
+            Ok(read) => read,
+            Err(PtouchError::Timeout) => {
+                debug!("No print status available yet");
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
 
         if read > transfer.len() {
             return Err(PtouchError::StatusError(format!(
@@ -519,6 +542,29 @@ where
             status.phase_number_lo
         );
 
+        if lifecycle.observe(&status)? {
+            debug!("Printer is ready to receive the next page");
+            return Ok(status);
+        }
+    }
+}
+
+/// State accumulated while consuming automatic status packets for one page.
+///
+/// A successful USB write only means the host controller accepted bytes. A
+/// `Printing completed` packet is also not sufficient: Brother documents that
+/// it may precede the end of the printer's feed/cut operation. The receiving
+/// phase is the protocol-level handoff that permits the next page.
+#[derive(Debug, Default)]
+struct PrintStatusLifecycle {
+    saw_printing: bool,
+    saw_completed: bool,
+}
+
+impl PrintStatusLifecycle {
+    /// Observe a status packet. Returns true only when the printer explicitly
+    /// reports that it can receive the next page.
+    fn observe(&mut self, status: &PrinterStatus) -> Result<bool> {
         if status.has_error() || status.status_type == 0x02 {
             let description = if status.has_error() {
                 status.error_description()
@@ -532,10 +578,20 @@ where
             return Err(PtouchError::StatusError("Printer turned off".to_string()));
         }
 
-        if status.is_waiting_to_receive() {
-            debug!("Printer is ready to receive the next page");
-            return Ok(status);
+        if status.status_type == 0x06 && status.phase_type == 0x01 {
+            self.saw_printing = true;
+        } else if status.status_type == 0x01 {
+            self.saw_completed = true;
         }
+
+        let ready = status.is_waiting_to_receive();
+        if ready {
+            debug!(
+                "Receiving phase observed (printing={}, completed={})",
+                self.saw_printing, self.saw_completed
+            );
+        }
+        Ok(ready)
     }
 }
 
@@ -597,7 +653,7 @@ mod tests {
             status_packet(0x06, 0x00),
         ]);
 
-        let status = receive_print_status(|buf| {
+        let status = receive_print_status(|buf, _timeout| {
             let packet = packets.pop_front().ok_or(PtouchError::Timeout)?;
             buf.copy_from_slice(&packet);
             Ok(packet.len())
@@ -613,11 +669,14 @@ mod tests {
     fn print_status_does_not_accept_printing_completed_as_ready() {
         let mut packets = VecDeque::from([status_packet(0x01, 0x00)]);
 
-        let result = receive_print_status(|buf| {
-            let packet = packets.pop_front().ok_or(PtouchError::Timeout)?;
-            buf.copy_from_slice(&packet);
-            Ok(packet.len())
-        });
+        let result = receive_print_status_with_timeout(
+            |buf, _timeout| {
+                let packet = packets.pop_front().ok_or(PtouchError::Timeout)?;
+                buf.copy_from_slice(&packet);
+                Ok(packet.len())
+            },
+            Duration::from_millis(1),
+        );
 
         assert!(matches!(result, Err(PtouchError::Timeout)));
     }
@@ -627,7 +686,7 @@ mod tests {
         let mut packet = status_packet(0x02, 0x00);
         packet[8] = 0x04;
 
-        let result = receive_print_status(|buf| {
+        let result = receive_print_status(|buf, _timeout| {
             buf.copy_from_slice(&packet);
             Ok(packet.len())
         });
@@ -642,13 +701,16 @@ mod tests {
     fn print_status_times_out_after_incomplete_packet() {
         let mut transfers = VecDeque::from([Ok(vec![0u8; 12]), Err(PtouchError::Timeout)]);
 
-        let result = receive_print_status(|buf| match transfers.pop_front().unwrap() {
-            Ok(transfer) => {
-                buf[..transfer.len()].copy_from_slice(&transfer);
-                Ok(transfer.len())
-            }
-            Err(error) => Err(error),
-        });
+        let result = receive_print_status_with_timeout(
+            |buf, _timeout| match transfers.pop_front().unwrap_or(Err(PtouchError::Timeout)) {
+                Ok(transfer) => {
+                    buf[..transfer.len()].copy_from_slice(&transfer);
+                    Ok(transfer.len())
+                }
+                Err(error) => Err(error),
+            },
+            Duration::from_millis(1),
+        );
 
         assert!(matches!(result, Err(PtouchError::Timeout)));
     }
@@ -662,7 +724,7 @@ mod tests {
             status_packet(0x06, 0x00).to_vec(),
         ]);
 
-        let status = receive_print_status(|buf| {
+        let status = receive_print_status(|buf, _timeout| {
             let transfer = transfers.pop_front().ok_or(PtouchError::Timeout)?;
             buf[..transfer.len()].copy_from_slice(&transfer);
             Ok(transfer.len())
@@ -678,7 +740,7 @@ mod tests {
         let ready = status_packet(0x06, 0x00);
         let mut transfers = VecDeque::from([ready[..11].to_vec(), ready[11..].to_vec()]);
 
-        let status = receive_print_status(|buf| {
+        let status = receive_print_status(|buf, _timeout| {
             let transfer = transfers.pop_front().ok_or(PtouchError::Timeout)?;
             buf[..transfer.len()].copy_from_slice(&transfer);
             Ok(transfer.len())
@@ -690,8 +752,56 @@ mod tests {
     }
 
     #[test]
+    fn print_status_tolerates_transient_usb_timeouts() {
+        let ready = status_packet(0x06, 0x00);
+        let mut transfers = VecDeque::from([
+            Err(PtouchError::Timeout),
+            Err(PtouchError::Timeout),
+            Ok(ready.to_vec()),
+        ]);
+
+        let status = receive_print_status(|buf, _timeout| {
+            match transfers.pop_front().ok_or(PtouchError::Timeout)? {
+                Ok(transfer) => {
+                    buf[..transfer.len()].copy_from_slice(&transfer);
+                    Ok(transfer.len())
+                }
+                Err(error) => Err(error),
+            }
+        })
+        .unwrap();
+
+        assert!(status.is_waiting_to_receive());
+        assert!(transfers.is_empty());
+    }
+
+    #[test]
+    fn consecutive_pages_each_wait_for_their_receiving_phase() {
+        let mut transfers = VecDeque::from([
+            status_packet(0x06, 0x01),
+            status_packet(0x01, 0x00),
+            status_packet(0x06, 0x00),
+            status_packet(0x06, 0x01),
+            status_packet(0x01, 0x00),
+            status_packet(0x06, 0x00),
+        ]);
+        let mut receive = |buf: &mut [u8], _timeout: Duration| {
+            let packet = transfers.pop_front().ok_or(PtouchError::Timeout)?;
+            buf.copy_from_slice(&packet);
+            Ok(packet.len())
+        };
+
+        let first = receive_print_status(&mut receive).unwrap();
+        let second = receive_print_status(&mut receive).unwrap();
+
+        assert!(first.is_waiting_to_receive());
+        assert!(second.is_waiting_to_receive());
+        assert!(transfers.is_empty());
+    }
+
+    #[test]
     fn print_status_has_an_overall_deadline() {
-        let result = receive_print_status_with_timeout(|_| Ok(0), Duration::ZERO);
+        let result = receive_print_status_with_timeout(|_, _| Ok(0), Duration::ZERO);
 
         assert!(matches!(result, Err(PtouchError::Timeout)));
     }

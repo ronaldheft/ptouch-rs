@@ -51,6 +51,16 @@ pub fn cmd_status_request() -> Vec<u8> {
     vec![0x1B, 0x69, 0x53]
 }
 
+/// Construct the automatic status notification command.
+///
+/// Brother encodes notification as zero and suppression as one. Keeping
+/// notifications enabled lets the transport observe the printer's phase
+/// changes without guessing from USB transfer completion or sleeping for a
+/// model-specific amount of time.
+pub fn cmd_auto_status_notification(enabled: bool) -> Vec<u8> {
+    vec![0x1B, 0x69, 0x21, if enabled { 0x00 } else { 0x01 }]
+}
+
 /// Construct the raster start command.
 ///
 /// For devices with FLAG_P700_INIT, uses "ESC i a 0x01" (switch to raster mode).
@@ -373,6 +383,18 @@ mod tests {
     #[test]
     fn test_cmd_status_request() {
         assert_eq!(cmd_status_request(), vec![0x1B, 0x69, 0x53]);
+    }
+
+    #[test]
+    fn test_cmd_auto_status_notification() {
+        assert_eq!(
+            cmd_auto_status_notification(true),
+            vec![0x1B, 0x69, 0x21, 0x00]
+        );
+        assert_eq!(
+            cmd_auto_status_notification(false),
+            vec![0x1B, 0x69, 0x21, 0x01]
+        );
     }
 
     #[test]
