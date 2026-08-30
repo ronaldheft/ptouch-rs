@@ -232,10 +232,7 @@ static DEVICE_TABLE: &[DeviceInfo] = &[
         name: "PT-P750W",
         max_px: 128,
         dpi: 180,
-        flags: DeviceFlags::RASTER_PACKBITS
-            .union(DeviceFlags::P700_INIT)
-            .union(DeviceFlags::WAIT_FOR_RECEIVE_READY)
-            .union(DeviceFlags::AUTO_STATUS_NOTIFICATION),
+        flags: DeviceFlags::RASTER_PACKBITS.union(DeviceFlags::P700_INIT),
     },
     DeviceInfo {
         vid: 0x04f9,
@@ -411,7 +408,7 @@ mod tests {
 
     #[test]
     fn readiness_wait_is_limited_to_documented_models() {
-        let opted_in_pids = [0x205e, 0x205f, 0x2061, 0x2062, 0x20af];
+        let opted_in_pids = [0x205e, 0x205f, 0x2061, 0x20af];
 
         for dev in supported_devices() {
             assert_eq!(
@@ -425,7 +422,7 @@ mod tests {
 
     #[test]
     fn automatic_status_command_is_limited_to_documented_models() {
-        let opted_in_pids = [0x2062, 0x20af];
+        let opted_in_pids = [0x20af];
 
         for dev in supported_devices() {
             assert_eq!(

@@ -764,6 +764,21 @@ mod tests {
     }
 
     #[test]
+    fn print_status_propagates_power_off() {
+        let packet = status_packet(0x04, 0x00);
+
+        let result = receive_print_status(|buf, _timeout| {
+            buf.copy_from_slice(&packet);
+            Ok(packet.len())
+        });
+
+        assert!(matches!(
+            result,
+            Err(PtouchError::StatusError(message)) if message == "Printer turned off"
+        ));
+    }
+
+    #[test]
     fn print_status_times_out_after_incomplete_packet() {
         let mut transfers = VecDeque::from([Ok(vec![0u8; 12]), Err(PtouchError::Timeout)]);
 
