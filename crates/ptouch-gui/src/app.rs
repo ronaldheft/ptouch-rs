@@ -115,7 +115,8 @@ impl PtouchApp {
 }
 
 impl eframe::App for PtouchApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         // Drain all pending responses from the printer worker
         while let Ok(resp) = self.resp_rx.try_recv() {
             match resp {
@@ -178,39 +179,39 @@ impl eframe::App for PtouchApp {
         }
 
         // Top toolbar
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+        egui::Panel::top("toolbar").show(ui, |ui| {
             panels::toolbar::show_toolbar(ui, &mut self.state);
         });
 
         // Bottom status bar
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+        egui::Panel::bottom("status_bar").show(ui, |ui| {
             panels::status_bar::show_status_bar(ui, &self.state);
         });
 
         // Left sidebar
-        egui::SidePanel::left("sidebar")
-            .default_width(200.0)
+        egui::Panel::left("sidebar")
+            .default_size(200.0)
             .resizable(true)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 panels::sidebar::show_sidebar(ui, &mut self.state);
             });
 
         // Right properties panel
-        egui::SidePanel::right("properties")
-            .default_width(250.0)
+        egui::Panel::right("properties")
+            .default_size(250.0)
             .resizable(true)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 panels::properties::show_properties(ui, &mut self.state);
             });
 
         // Central canvas
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             panels::canvas::show_canvas(ui, &mut self.state);
         });
 
         // Re-render preview if dirty
         if self.state.needs_rerender {
-            self.update_preview(ctx);
+            self.update_preview(&ctx);
         }
 
         // Periodic repaint so we pick up worker responses even when idle

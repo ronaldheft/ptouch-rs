@@ -15,10 +15,10 @@ repository.workspace = true
 [dependencies]
 ptouch-core = { path = "../ptouch-core" }
 image = { version = "0.25", default-features = false, features = ["default-formats"] }
-resvg = "0.47"
-cosmic-text = "0.18"
+resvg = "0.48"
+cosmic-text = "0.19"
 log = "0.4"
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
-toml = "0.8"
-base64 = "0.22"
+toml = "1.1"
+base64 = "0.23"

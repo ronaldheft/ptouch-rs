@@ -124,18 +124,8 @@ impl TextRenderer {
         let layout_width = 16384.0f32;
 
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        buffer.set_size(
-            &mut self.font_system,
-            Some(layout_width),
-            Some(available_height),
-        );
-        buffer.set_text(
-            &mut self.font_system,
-            &text,
-            &attrs,
-            Shaping::Advanced,
-            cosmic_align,
-        );
+        buffer.set_size(Some(layout_width), Some(available_height));
+        buffer.set_text(&text, &attrs, Shaping::Advanced, cosmic_align);
         buffer.shape_until_scroll(&mut self.font_system, true);
 
         // Measure tight horizontal extent (min_x..max_x) from layout runs.
