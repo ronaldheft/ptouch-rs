@@ -57,6 +57,7 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
             bitmap,
             rotation,
             target_height,
+            target_width,
             flip_h,
             flip_v,
         } => {
@@ -68,6 +69,7 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
                     bitmap,
                     rotation,
                     target_height,
+                    target_width,
                     flip_h,
                     flip_v,
                 },
@@ -107,6 +109,7 @@ struct ImageProps<'a> {
     bitmap: &'a mut Option<ptouch_render::bitmap::LabelBitmap>,
     rotation: &'a mut f32,
     target_height: &'a mut Option<u32>,
+    target_width: &'a mut Option<u32>,
     flip_h: &'a mut bool,
     flip_v: &'a mut bool,
 }
@@ -345,6 +348,7 @@ fn show_image_properties(ui: &mut egui::Ui, props: ImageProps, state: &mut AppSt
         bitmap,
         rotation,
         target_height,
+        target_width,
         flip_h,
         flip_v,
     } = props;
@@ -401,6 +405,44 @@ fn show_image_properties(ui: &mut egui::Ui, props: ImageProps, state: &mut AppSt
             ui.label("Height:");
             if ui
                 .add(egui::DragValue::new(h).speed(1.0).range(1..=1000))
+                .changed()
+            {
+                changed = true;
+            }
+            ui.label("px");
+        });
+    }
+
+    // Width sizing (auto = preserve source aspect ratio). An explicit width
+    // is the logical placement width, independent of source sample density.
+    let mut use_auto_width = target_width.is_none();
+    if ui
+        .checkbox(&mut use_auto_width, "Auto width (preserve aspect)")
+        .changed()
+    {
+        if use_auto_width {
+            *target_width = None;
+        } else {
+            let placement_height = target_height.unwrap_or(state.tape_width_px);
+            let proportional_width = bitmap
+                .as_ref()
+                .filter(|bmp| bmp.height() > 0)
+                .map(|bmp| {
+                    ((u64::from(bmp.width()) * u64::from(placement_height))
+                        / u64::from(bmp.height()))
+                    .max(1) as u32
+                })
+                .unwrap_or(placement_height);
+            *target_width = Some(proportional_width);
+        }
+        changed = true;
+    }
+
+    if let Some(w) = target_width {
+        ui.horizontal(|ui| {
+            ui.label("Logical width:");
+            if ui
+                .add(egui::DragValue::new(w).speed(1.0).range(1..=10000))
                 .changed()
             {
                 changed = true;

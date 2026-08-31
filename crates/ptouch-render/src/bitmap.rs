@@ -428,11 +428,27 @@ impl LabelBitmap {
         }
         let scale = target_height as f64 / self.height as f64;
         let target_width = ((self.width as f64 * scale).round() as u32).max(1);
+        self.scale_to_size(target_width, target_height)
+    }
+
+    /// Scale to an exact width and height using nearest-neighbor sampling.
+    ///
+    /// Exact dimensions are useful when an image contains more samples than
+    /// its logical placement size, such as a native feed-resolution raster.
+    pub fn scale_to_size(&self, target_width: u32, target_height: u32) -> LabelBitmap {
+        if self.height == 0 || self.width == 0 || target_width == 0 || target_height == 0 {
+            return LabelBitmap::new(target_width, target_height);
+        }
+        if self.width == target_width && self.height == target_height {
+            return self.clone();
+        }
         let mut result = LabelBitmap::new(target_width, target_height);
         for y in 0..target_height {
-            let src_y = ((y as f64 / scale).floor() as u32).min(self.height - 1);
+            let src_y = ((u64::from(y) * u64::from(self.height)) / u64::from(target_height))
+                .min(u64::from(self.height - 1)) as u32;
             for x in 0..target_width {
-                let src_x = ((x as f64 / scale).floor() as u32).min(self.width - 1);
+                let src_x = ((u64::from(x) * u64::from(self.width)) / u64::from(target_width))
+                    .min(u64::from(self.width - 1)) as u32;
                 if self.get_pixel(src_x, src_y) {
                     result.set_pixel(x, y, true);
                 }
@@ -749,6 +765,22 @@ mod tests {
         assert_eq!(scaled.height(), 100);
         assert_eq!(scaled.width(), 50); // 100 * 0.5
         assert!(scaled.get_pixel(25, 50));
+    }
+
+    #[test]
+    fn test_scale_to_size_uses_independent_axes() {
+        let mut bmp = LabelBitmap::new(2, 2);
+        bmp.set_pixel(0, 0, true);
+        bmp.set_pixel(1, 1, true);
+
+        let scaled = bmp.scale_to_size(4, 2);
+        assert_eq!((scaled.width(), scaled.height()), (4, 2));
+        assert!(scaled.get_pixel(0, 0));
+        assert!(scaled.get_pixel(1, 0));
+        assert!(!scaled.get_pixel(2, 0));
+        assert!(!scaled.get_pixel(0, 1));
+        assert!(scaled.get_pixel(2, 1));
+        assert!(scaled.get_pixel(3, 1));
     }
 
     #[test]

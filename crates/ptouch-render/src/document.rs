@@ -219,6 +219,11 @@ pub enum LabelElement {
         /// Target height in pixels. `None` = auto (fit to tape height).
         #[serde(skip_serializing_if = "Option::is_none")]
         target_height: Option<u32>,
+        /// Logical width in pixels. The source may contain more samples than
+        /// this placement width; high-quality rendering scales the logical
+        /// width to the printer's feed resolution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_width: Option<u32>,
         /// Mirror this element left-right (horizontal). Applied to the element's
         /// own bitmap, before it is composed into the label.
         #[serde(default)]
@@ -252,6 +257,7 @@ impl LabelElement {
             bitmap,
             rotation: 0.0,
             target_height: None,
+            target_width: None,
             flip_h: false,
             flip_v: false,
         }
@@ -368,6 +374,7 @@ pub fn render_elements_with_scale(
                 bitmap,
                 rotation,
                 target_height,
+                target_width,
                 flip_h,
                 flip_v,
                 ..
@@ -376,6 +383,7 @@ pub fn render_elements_with_scale(
                 image_data,
                 *rotation,
                 target_height.map(|height| height * scale),
+                target_width.map(|width| width * scale),
                 canvas_height,
             ) {
                 Some(seg) => seg.mirrored(*flip_h, *flip_v),
@@ -465,6 +473,7 @@ fn render_image_segment(
     image_data: &[u8],
     rotation: f32,
     target_height: Option<u32>,
+    target_width: Option<u32>,
     tape_width_px: u32,
 ) -> Option<LabelBitmap> {
     let bmp = if let Some(bmp) = cached {
@@ -485,8 +494,14 @@ fn render_image_segment(
         return None;
     };
 
-    // Scale to target height (auto = tape height, manual = specified).
-    let bmp = bmp.scale_to_height(target_height.unwrap_or(tape_width_px));
+    // Height defaults to the full tape. An explicit logical width controls
+    // physical placement independently from the source sample count.
+    let target_height = target_height.unwrap_or(tape_width_px);
+    let bmp = if let Some(target_width) = target_width {
+        bmp.scale_to_size(target_width, target_height)
+    } else {
+        bmp.scale_to_height(target_height)
+    };
 
     if is_rotated(rotation) {
         Some(bmp.rotate(rotation).fit_height(tape_width_px))
@@ -592,6 +607,7 @@ mod tests {
                 bitmap,
                 rotation,
                 target_height,
+                target_width,
                 flip_v,
                 ..
             } => LabelElement::Image {
@@ -600,6 +616,7 @@ mod tests {
                 bitmap,
                 rotation,
                 target_height,
+                target_width,
                 flip_h,
                 flip_v,
             },
@@ -743,6 +760,34 @@ mod tests {
     }
 
     #[test]
+    fn explicit_image_width_places_native_feed_resolution_at_logical_size() {
+        let doc = LabelDocument {
+            version: DOCUMENT_VERSION,
+            tape_width_mm: 24,
+            dpi: 180,
+            font_name: String::new(),
+            font_margin: 0,
+            flip_h: false,
+            flip_v: false,
+            elements: vec![LabelElement::image_from_bytes(None, png_bytes(466, 128))],
+        };
+        let text = doc.to_toml_string().unwrap().replace(
+            "rotation = 0.0",
+            "rotation = 0.0\ntarget_height = 128\ntarget_width = 233",
+        );
+        let parsed = LabelDocument::from_toml_str(&text).unwrap();
+
+        let mut renderer = TextRenderer::new();
+        let preview = render_elements_with_scale(&parsed.elements, 128, "", 0, &mut renderer, 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!((preview.width(), preview.height()), (466, 256));
+
+        let printer = preview.downsample_height(2);
+        assert_eq!((printer.width(), printer.height()), (466, 128));
+    }
+
+    #[test]
     fn test_empty_text_is_skipped() {
         let mut renderer = TextRenderer::new();
         let elements = vec![LabelElement::Text {
@@ -777,6 +822,7 @@ mod tests {
                 image_data,
                 bitmap,
                 target_height,
+                target_width,
                 ..
             } => LabelElement::Image {
                 path,
@@ -784,6 +830,7 @@ mod tests {
                 bitmap,
                 rotation: 90.0,
                 target_height,
+                target_width,
                 flip_h: false,
                 flip_v: false,
             },
@@ -888,6 +935,7 @@ mod tests {
                 bitmap: None,
                 rotation: 0.0,
                 target_height: None,
+                target_width: None,
                 flip_h: false,
                 flip_v: false,
             }],

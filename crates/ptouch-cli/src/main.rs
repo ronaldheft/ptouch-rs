@@ -91,6 +91,10 @@ struct PrintArgs {
     #[arg(long, value_enum, default_value = "auto")]
     binarize: BinarizeArg,
 
+    /// Logical image width in standard-resolution layout pixels
+    #[arg(long)]
+    image_width: Option<u32>,
+
     /// Export a square-pixel physical preview instead of printing
     #[arg(short = 'o', long)]
     output: Option<String>,
@@ -265,7 +269,17 @@ fn main() {
 /// Ad-hoc content flags overridden when `--layout` is set. Keep in sync with
 /// `PrintArgs`; the `content_flag_ids_resolve` test guards against renames.
 const CONTENT_FLAG_IDS: &[&str] = &[
-    "text", "image", "font", "size", "align", "margin", "cut", "pad", "flip_h", "flip_v",
+    "text",
+    "image",
+    "image_width",
+    "font",
+    "size",
+    "align",
+    "margin",
+    "cut",
+    "pad",
+    "flip_h",
+    "flip_v",
 ];
 
 /// Return the display names of content flags the user explicitly passed on the
@@ -481,6 +495,10 @@ fn execute_info(_args: &InfoArgs) -> Result<(), Box<dyn std::error::Error>> {
 fn execute_print(args: &PrintArgs, ignored: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.tape_width == Some(0) {
         eprintln!("Error: --tape-width must be greater than 0");
+        process::exit(1);
+    }
+    if args.image_width == Some(0) {
+        eprintln!("Error: --image-width must be greater than 0");
         process::exit(1);
     }
 
@@ -862,10 +880,15 @@ fn build_label(
         debug!("Loading image: {}", img_path);
         let options = image_loader::ImageLoadOptions {
             binarize: args.binarize.to_binarize_mode(),
-            target_height: Some(canvas_height),
+            target_height: args.image_width.is_none().then_some(print_width),
             ..image_loader::ImageLoadOptions::default()
         };
-        let img_bitmap = image_loader::load_image(Path::new(img_path), &options)?;
+        let mut img_bitmap = image_loader::load_image(Path::new(img_path), &options)?;
+        if let Some(logical_width) = args.image_width {
+            img_bitmap = img_bitmap.scale_to_size(logical_width * feed_scale, canvas_height);
+        } else if feed_scale > 1 {
+            img_bitmap = img_bitmap.scale_to_size(img_bitmap.width() * feed_scale, canvas_height);
+        }
         result = Some(append_bitmap(result, img_bitmap));
     }
 
@@ -1040,6 +1063,22 @@ mod tests {
             print.get_one::<String>("raster_output").map(String::as_str),
             Some("printer.png"),
         );
+    }
+
+    #[test]
+    fn test_image_width_is_a_logical_placement_dimension() {
+        let matches = print_matches(&[
+            "ptouch",
+            "print",
+            "--image",
+            "native-raster.png",
+            "--image-width",
+            "233",
+            "--quality",
+            "high",
+        ]);
+        let (_, print) = matches.subcommand().unwrap();
+        assert_eq!(print.get_one::<u32>("image_width").copied(), Some(233));
     }
 
     #[test]

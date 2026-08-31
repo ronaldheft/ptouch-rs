@@ -96,8 +96,8 @@ ptouch print "Label" -f "DejaVu Sans" -s 32 -a center
 # Print image (PNG, JPEG, BMP, SVG, etc.)
 ptouch print -i logo.png
 
-# Preview a high-resolution print and inspect its exact printer raster
-ptouch print -i label-360dpi.png --quality high \
+# Place a 466px native-feed image in a 233px logical width
+ptouch print -i label-466x128.png --image-width 233 --quality high \
   --output preview.png --raster-output printer-raster.png
 
 # Text + image + cut mark
@@ -123,12 +123,30 @@ ptouch info
 ptouch list
 ```
 
-For printers with native feed-axis high resolution, `--quality high` renders
-the complete label on a square-pixel working canvas before converting it to
-the printer's anisotropic raster. `--output` saves the physical preview, while
-`--raster-output` saves the exact rows sent to the printer. Supply images at
-the preview resolution; the printer raster is derived without stretching the
-preview.
+Images are ordinary square-pixel, standard-resolution content by default. For
+printers with native feed-axis high resolution, `--quality high` adds feed-axis
+samples without discarding tape-height rows. A source may provide those extra
+samples itself: `--image-width` sets its logical placement width independently
+from its pixel width. For example, a 466x128 source placed at logical width 233
+produces a 466x128 printer raster and a 466x256 physical preview.
+
+Saved layouts provide the same control with an optional `target_width` on an
+image element. `target_height` and `target_width` are logical pixels at the
+layout DPI; source image dimensions remain independent.
+
+```toml
+[[elements]]
+type = "image"
+image_data = "..."
+rotation = 0.0
+target_height = 128
+target_width = 233
+flip_h = false
+flip_v = false
+```
+
+`--output` saves the square-pixel physical preview, while `--raster-output`
+saves the exact anisotropic raster sent to the printer.
 
 ### Layout templates and batch printing
 
@@ -163,7 +181,9 @@ cat people.csv | ptouch print --layout badge.ptl --csv - --set dept=Eng
 | | `--list-vars` | List the placeholders a layout declares, then exit |
 | | `--allow-missing` | Render placeholders with no value as blank |
 | `-i` | `--image` | Image file path |
+| | `--image-width` | Logical image placement width in standard-resolution pixels |
 | `-o` | `--output` | Export to image file instead of printing |
+| | `--raster-output` | Export the exact anisotropic printer raster |
 | `-f` | `--font` | Font name (default: DejaVuSans) |
 | `-s` | `--size` | Font size in points (auto if omitted) |
 | `-m` | `--margin` | Top/bottom margin in pixels |
