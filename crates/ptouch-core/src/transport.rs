@@ -33,12 +33,22 @@ const STATUS_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// Maximum number of status read retries.
 const STATUS_MAX_RETRIES: usize = 10;
 
-/// Maximum time to process automatic status transfers after a print command.
-const PRINT_STATUS_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum time to wait without hearing anything from the printer after a
+/// print command. The deadline restarts on every status transfer, so a label
+/// that takes minutes to feed is bounded by printer silence, not by the total
+/// length of the job.
+const PRINT_STATUS_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Bound each USB read so transient silence cannot consume the whole print
-/// lifecycle deadline in a single transfer.
+/// Bound each USB read so transient silence cannot consume the whole idle
+/// deadline in a single transfer.
 const PRINT_STATUS_POLL_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Never hand libusb a zero timeout, which means "wait forever".
+const PRINT_STATUS_MIN_POLL_TIMEOUT: Duration = Duration::from_millis(1);
+
+/// Pace the loop after a zero-length bulk transfer so a printer that keeps
+/// completing empty reads cannot spin a core until the deadline expires.
+const ZERO_LENGTH_TRANSFER_DELAY: Duration = Duration::from_millis(10);
 
 /// USB interface number for P-Touch printers.
 const USB_INTERFACE: u8 = 0;
@@ -481,9 +491,20 @@ impl PtouchDevice {
     }
 
     fn wait_until_ready(&mut self) -> Result<()> {
-        let status = receive_print_status(|buf, timeout| self.receive_with_timeout(buf, timeout))?;
-        self.status = Some(status);
-        Ok(())
+        match receive_print_status(|buf, timeout| self.receive_with_timeout(buf, timeout)) {
+            Ok(status) => {
+                self.status = Some(status);
+                Ok(())
+            }
+            // The printer stopped talking without announcing the receiving
+            // phase. The page itself has most likely printed, so fall back to
+            // the best-effort contract instead of failing a finished job.
+            Err(PtouchError::Timeout) => {
+                warn!("Printer did not report the receiving phase, continuing anyway");
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Preserve the original best-effort completion read for models whose
@@ -525,23 +546,28 @@ fn receive_print_status<F>(mut receive: F) -> Result<PrinterStatus>
 where
     F: FnMut(&mut [u8], Duration) -> Result<usize>,
 {
-    receive_print_status_with_timeout(&mut receive, PRINT_STATUS_TIMEOUT)
+    receive_print_status_with_timeout(&mut receive, PRINT_STATUS_IDLE_TIMEOUT)
 }
 
-fn receive_print_status_with_timeout<F>(mut receive: F, timeout: Duration) -> Result<PrinterStatus>
+fn receive_print_status_with_timeout<F>(
+    mut receive: F,
+    idle_timeout: Duration,
+) -> Result<PrinterStatus>
 where
     F: FnMut(&mut [u8], Duration) -> Result<usize>,
 {
-    let started = Instant::now();
+    let mut last_transfer = Instant::now();
     let mut frames = StatusFrameBuffer::new();
 
     loop {
-        let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+        let Some(remaining) = idle_timeout.checked_sub(last_transfer.elapsed()) else {
             return Err(PtouchError::Timeout);
         };
 
         let mut transfer = [0u8; STATUS_PACKET_SIZE];
-        let read_timeout = remaining.min(PRINT_STATUS_POLL_TIMEOUT);
+        let read_timeout = remaining
+            .min(PRINT_STATUS_POLL_TIMEOUT)
+            .max(PRINT_STATUS_MIN_POLL_TIMEOUT);
         let read = match receive(&mut transfer, read_timeout) {
             Ok(read) => read,
             Err(PtouchError::Timeout) => {
@@ -563,8 +589,13 @@ where
         // status packet. Keep waiting within the overall deadline.
         if read == 0 {
             debug!("Ignoring zero-length USB transfer after print");
+            std::thread::sleep(ZERO_LENGTH_TRANSFER_DELAY);
             continue;
         }
+
+        // Real bytes mean the job is still alive. Restart the idle deadline so
+        // a label that feeds for a long time is not cut short mid-print.
+        last_transfer = Instant::now();
 
         frames.push(&transfer[..read]);
         if frames.len() < STATUS_PACKET_SIZE {
@@ -902,5 +933,51 @@ mod tests {
         let result = receive_print_status_with_timeout(|_, _| Ok(0), Duration::ZERO);
 
         assert!(matches!(result, Err(PtouchError::Timeout)));
+    }
+
+    #[test]
+    fn print_status_deadline_restarts_on_every_transfer() {
+        let mut packets = VecDeque::from([
+            status_packet(0x06, 0x01),
+            status_packet(0x06, 0x01),
+            status_packet(0x01, 0x00),
+            status_packet(0x06, 0x00),
+        ]);
+
+        // Every gap stays inside the idle deadline while the total elapsed
+        // time runs past it, which is what a long label looks like.
+        let status = receive_print_status_with_timeout(
+            |buf, _timeout| {
+                std::thread::sleep(Duration::from_millis(100));
+                let packet = packets.pop_front().ok_or(PtouchError::Timeout)?;
+                buf.copy_from_slice(&packet);
+                Ok(packet.len())
+            },
+            Duration::from_millis(300),
+        )
+        .unwrap();
+
+        assert!(status.is_waiting_to_receive());
+        assert!(packets.is_empty());
+    }
+
+    #[test]
+    fn print_status_paces_zero_length_transfers() {
+        let mut transfers = 0usize;
+
+        let result = receive_print_status_with_timeout(
+            |_, _| {
+                transfers += 1;
+                Ok(0)
+            },
+            Duration::from_millis(50),
+        );
+
+        assert!(matches!(result, Err(PtouchError::Timeout)));
+        assert!(
+            transfers <= 50,
+            "zero-length transfers were not paced ({} reads)",
+            transfers
+        );
     }
 }
