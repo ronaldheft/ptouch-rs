@@ -26,7 +26,7 @@ use ptouch_render::bitmap::LabelBitmap;
 use ptouch_render::document::{self, LabelDocument};
 use ptouch_render::image_loader;
 use ptouch_render::raster;
-use ptouch_render::text::{TextAlign, TextRenderer};
+use ptouch_render::text::{TextAlign, TextRenderStyle, TextRenderer};
 
 // ---------------------------------------------------------------------------
 // CLI argument definitions
@@ -532,8 +532,17 @@ fn execute_print(args: &PrintArgs, ignored: &[String]) -> Result<(), Box<dyn std
         };
 
     // Whole-label mirroring applies once, after the label is composed.
-    let bitmap = build_label(args, print_width)?.mirrored(args.flip_h, args.flip_v);
-    emit_label(&bitmap, args, max_px, device.as_mut())?;
+    let feed_scale = if matches!(args.quality, QualityArg::High)
+        && device
+            .as_ref()
+            .is_none_or(|dev| dev.flags().contains(DeviceFlags::FEED_HIRES))
+    {
+        2
+    } else {
+        1
+    };
+    let bitmap = build_label(args, print_width, feed_scale)?.mirrored(args.flip_h, args.flip_v);
+    emit_label(&bitmap, args, max_px, device.as_mut(), feed_scale)?;
 
     if let Some(dev) = device {
         dev.close()?;
@@ -565,8 +574,9 @@ fn print_layout(args: &PrintArgs, layout_path: &str) -> Result<(), Box<dyn std::
     doc.apply_values(&values);
 
     let (print_width, max_px, mut device) = resolve_layout_target(args, &doc)?;
-    let bitmap = render_layout(&doc, print_width)?;
-    emit_label(&bitmap, args, max_px, device.as_mut())?;
+    let feed_scale = layout_feed_scale(args, &doc, device.as_ref());
+    let bitmap = render_layout(&doc, print_width, feed_scale)?;
+    emit_label(&bitmap, args, max_px, device.as_mut(), feed_scale)?;
 
     if let Some(dev) = device {
         dev.close()?;
@@ -613,7 +623,8 @@ fn print_layout_batch(
 
         let mut row_doc = doc.clone();
         row_doc.apply_values(&values);
-        let bitmap = render_layout(&row_doc, print_width)?;
+        let feed_scale = layout_feed_scale(args, &row_doc, device.as_ref());
+        let bitmap = render_layout(&row_doc, print_width, feed_scale)?;
 
         count += 1;
         if let Some(output) = &args.output {
@@ -657,18 +668,34 @@ fn build_row_values(
 fn render_layout(
     doc: &LabelDocument,
     print_width: u32,
+    feed_scale: u32,
 ) -> Result<LabelBitmap, Box<dyn std::error::Error>> {
     let mut renderer = TextRenderer::new();
-    let bitmap = document::render_elements(
+    let bitmap = document::render_elements_with_feed_scale(
         &doc.elements,
         print_width,
         &doc.font_name,
         doc.font_margin,
         &mut renderer,
+        feed_scale,
     )?
     .ok_or_else(|| PtouchError::SendFailed("layout produced no output".to_string()))?;
     // The layout's saved whole-label flip is applied after composition.
     Ok(bitmap.mirrored(doc.flip_h, doc.flip_v))
+}
+
+fn layout_feed_scale(args: &PrintArgs, doc: &LabelDocument, device: Option<&PtouchDevice>) -> u32 {
+    if !matches!(args.quality, QualityArg::High) {
+        return 1;
+    }
+    if let Some(device) = device {
+        return if device.flags().contains(DeviceFlags::FEED_HIRES) {
+            2
+        } else {
+            1
+        };
+    }
+    if doc.dpi < 360 { 2 } else { 1 }
 }
 
 /// Resolve the print width, max pixels, and optional device for a layout.
@@ -727,11 +754,13 @@ fn emit_label(
     args: &PrintArgs,
     max_px: u16,
     device: Option<&mut PtouchDevice>,
+    feed_scale: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref output_path) = args.output {
         bitmap.save(Path::new(output_path))?;
         let dpi = device.as_ref().map_or(180, |d| d.device_info().dpi);
-        let tape_mm = bitmap.width() as f64 / f64::from(dpi) * 25.4;
+        let feed_dpi = u32::from(dpi) * feed_scale.max(1);
+        let tape_mm = bitmap.width() as f64 / f64::from(feed_dpi) * 25.4;
         println!(
             "Saved to '{}' ({}x{} px, {:.1} mm of tape)",
             output_path,
@@ -752,6 +781,7 @@ fn emit_label(
 fn build_label(
     args: &PrintArgs,
     print_width: u32,
+    feed_scale: u32,
 ) -> Result<LabelBitmap, Box<dyn std::error::Error>> {
     let mut result: Option<LabelBitmap> = None;
 
@@ -770,13 +800,16 @@ fn build_label(
             args.align
         );
 
-        let text_bitmap = renderer.render_text(
+        let text_bitmap = renderer.render_text_with_feed_scale(
             &lines,
             print_width,
             &args.font,
-            args.size,
-            args.margin,
-            align,
+            TextRenderStyle {
+                font_size: args.size,
+                font_margin: args.margin,
+                align,
+                feed_scale,
+            },
         )?;
 
         result = Some(append_bitmap(result, text_bitmap));
@@ -790,21 +823,22 @@ fn build_label(
             target_height: Some(print_width),
             ..image_loader::ImageLoadOptions::default()
         };
-        let img_bitmap = image_loader::load_image(Path::new(img_path), &options)?;
+        let img_bitmap =
+            image_loader::load_image(Path::new(img_path), &options)?.scale_width(feed_scale);
         result = Some(append_bitmap(result, img_bitmap));
     }
 
     // Add cut mark if requested
     if args.cut {
         debug!("Adding cut mark");
-        let mark = make_cutmark(print_width);
+        let mark = make_cutmark(print_width).scale_width(feed_scale);
         result = Some(append_bitmap(result, mark));
     }
 
     // Add padding if requested
     if let Some(pad_px) = args.pad {
         debug!("Adding {} px padding", pad_px);
-        let pad = make_padding(print_width, pad_px);
+        let pad = make_padding(print_width, pad_px).scale_width(feed_scale);
         result = Some(append_bitmap(result, pad));
     }
 
@@ -876,7 +910,15 @@ fn print_to_device(
         )?;
     }
 
-    let tape_mm = bitmap.width() as f64 / f64::from(dev.device_info().dpi) * 25.4;
+    let feed_scale = if matches!(args.quality, QualityArg::High)
+        && dev.flags().contains(DeviceFlags::FEED_HIRES)
+    {
+        2
+    } else {
+        1
+    };
+    let feed_dpi = u32::from(dev.device_info().dpi) * feed_scale;
+    let tape_mm = bitmap.width() as f64 / f64::from(feed_dpi) * 25.4;
     println!(
         "Printed {} cop{} ({:.1} mm of tape each)",
         total_copies,

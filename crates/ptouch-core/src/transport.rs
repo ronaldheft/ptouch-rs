@@ -393,7 +393,7 @@ impl PtouchDevice {
     /// * `lines` - Raster image data, one byte-slice per line.
     /// * `chain_print` - If true, don't cut the tape (chain mode).
     /// * `precut` - If true AND device supports precut, send precut command.
-    /// * `quality` - Print quality mode (device must support non-standard).
+    /// * `quality` - Print quality mode (device must support the selected mode).
     ///
     /// # Errors
     ///
@@ -411,9 +411,17 @@ impl PtouchDevice {
             return Err(PtouchError::NotInitialized);
         }
 
-        if quality != protocol::PrintQuality::Standard
-            && !self.dev_info.flags.contains(DeviceFlags::LEGACY_HIRES)
-        {
+        let supported_quality = match quality {
+            protocol::PrintQuality::Standard => true,
+            protocol::PrintQuality::HighRes => self
+                .dev_info
+                .flags
+                .intersects(DeviceFlags::LEGACY_HIRES | DeviceFlags::FEED_HIRES),
+            protocol::PrintQuality::Draft => {
+                self.dev_info.flags.contains(DeviceFlags::LEGACY_HIRES)
+            }
+        };
+        if !supported_quality {
             return Err(PtouchError::UnsupportedQuality(
                 self.dev_info.name.to_string(),
             ));

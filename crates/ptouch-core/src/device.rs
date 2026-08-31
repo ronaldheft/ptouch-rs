@@ -42,6 +42,9 @@ bitflags! {
         const WAIT_FOR_RECEIVE_READY = 1 << 8;
         /// Device supports ESC i ! for configuring automatic status notification.
         const AUTO_STATUS_NOTIFICATION = 1 << 9;
+        /// Device accepts native 2x feed-resolution raster data when high
+        /// resolution is selected through the advanced-mode command.
+        const FEED_HIRES      = 1 << 10;
     }
 }
 
@@ -307,7 +310,8 @@ static DEVICE_TABLE: &[DeviceInfo] = &[
         flags: DeviceFlags::RASTER_PACKBITS
             .union(DeviceFlags::HAS_PRECUT)
             .union(DeviceFlags::WAIT_FOR_RECEIVE_READY)
-            .union(DeviceFlags::AUTO_STATUS_NOTIFICATION),
+            .union(DeviceFlags::AUTO_STATUS_NOTIFICATION)
+            .union(DeviceFlags::FEED_HIRES),
     },
     DeviceInfo {
         vid: 0x04f9,
@@ -372,6 +376,13 @@ mod tests {
     #[test]
     fn test_find_unknown_device() {
         assert!(find_device(0x04f9, 0xFFFF).is_none());
+    }
+
+    #[test]
+    fn p710bt_supports_native_feed_high_resolution() {
+        let dev = find_device(0x04f9, 0x20af).unwrap();
+        assert!(dev.flags.contains(DeviceFlags::FEED_HIRES));
+        assert!(!dev.flags.contains(DeviceFlags::LEGACY_HIRES));
     }
 
     #[test]

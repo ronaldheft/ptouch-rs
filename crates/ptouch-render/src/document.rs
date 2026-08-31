@@ -20,7 +20,7 @@ use crate::Result;
 use crate::bitmap::LabelBitmap;
 use crate::compose;
 use crate::image_loader::{self, ImageLoadOptions};
-use crate::text::{TextAlign, TextRenderer};
+use crate::text::{TextAlign, TextRenderStyle, TextRenderer};
 
 /// Current on-disk layout format version.
 pub const DOCUMENT_VERSION: u32 = 1;
@@ -297,6 +297,12 @@ struct FontSettings<'a> {
     margin: u32,
 }
 
+#[derive(Clone, Copy)]
+struct RenderGeometry {
+    tape_width_px: u32,
+    feed_scale: u32,
+}
+
 /// Render an ordered element list into a single label bitmap.
 ///
 /// Elements are rendered to `tape_width_px` tall segments and concatenated left
@@ -310,6 +316,20 @@ pub fn render_elements(
     font_margin: u32,
     renderer: &mut TextRenderer,
 ) -> Result<Option<LabelBitmap>> {
+    render_elements_with_feed_scale(elements, tape_width_px, font_name, font_margin, renderer, 1)
+}
+
+/// Render elements with extra samples along the tape-feed axis while
+/// preserving the tape-width pixel count.
+pub fn render_elements_with_feed_scale(
+    elements: &[LabelElement],
+    tape_width_px: u32,
+    font_name: &str,
+    font_margin: u32,
+    renderer: &mut TextRenderer,
+    feed_scale: u32,
+) -> Result<Option<LabelBitmap>> {
+    let feed_scale = feed_scale.max(1);
     let mut result: Option<LabelBitmap> = None;
 
     for element in elements {
@@ -327,7 +347,10 @@ pub fn render_elements(
                 *font_size,
                 *align,
                 *rotation,
-                tape_width_px,
+                RenderGeometry {
+                    tape_width_px,
+                    feed_scale,
+                },
                 &FontSettings {
                     name: font_name,
                     margin: font_margin,
@@ -358,6 +381,10 @@ pub fn render_elements(
             LabelElement::Padding { pixels } => compose::padding(tape_width_px, *pixels),
         };
 
+        let segment = match element {
+            LabelElement::Text { rotation, .. } if !is_rotated(*rotation) => segment,
+            _ => segment.scale_width(feed_scale),
+        };
         result = Some(match result {
             Some(prev) => prev.append(&segment),
             None => segment,
@@ -374,7 +401,7 @@ fn render_text_segment(
     font_size: Option<f32>,
     align: TextAlign,
     rotation: f32,
-    tape_width_px: u32,
+    geometry: RenderGeometry,
     font: &FontSettings,
 ) -> Option<LabelBitmap> {
     if content.is_empty() {
@@ -385,7 +412,8 @@ fn render_text_segment(
 
     // For rotated text with auto size, pick a size whose rotated bounding box
     // fits within the tape height.
-    let effective_font_size = rotation_aware_font_size(font_size, rotation, &lines, tape_width_px);
+    let effective_font_size =
+        rotation_aware_font_size(font_size, rotation, &lines, geometry.tape_width_px);
 
     // Rotated text needs a taller render area so all lines stay visible; the
     // height becomes tape length after rotation.
@@ -393,22 +421,37 @@ fn render_text_segment(
         if let Some(fs) = effective_font_size {
             let line_h = (fs * 1.2).ceil();
             let text_h = (lines.len() as f32 * line_h).ceil() as u32 + font.margin * 2;
-            text_h.max(tape_width_px)
+            text_h.max(geometry.tape_width_px)
         } else {
-            tape_width_px
+            geometry.tape_width_px
         }
     } else {
-        tape_width_px
+        geometry.tape_width_px
     };
 
-    let bmp = match renderer.render_text(
-        &lines,
-        render_height,
-        font.name,
-        effective_font_size,
-        font.margin,
-        align,
-    ) {
+    let rendered = if is_rotated {
+        renderer.render_text(
+            &lines,
+            render_height,
+            font.name,
+            effective_font_size,
+            font.margin,
+            align,
+        )
+    } else {
+        renderer.render_text_with_feed_scale(
+            &lines,
+            render_height,
+            font.name,
+            TextRenderStyle {
+                font_size: effective_font_size,
+                font_margin: font.margin,
+                align,
+                feed_scale: geometry.feed_scale,
+            },
+        )
+    };
+    let bmp = match rendered {
         Ok(bmp) => bmp,
         Err(e) => {
             error!("Text render failed: {}", e);
@@ -422,7 +465,7 @@ fn render_text_segment(
         Some(
             bmp.trim_vertical()
                 .rotate(rotation)
-                .fit_height(tape_width_px),
+                .fit_height(geometry.tape_width_px),
         )
     } else {
         Some(bmp)
@@ -684,6 +727,17 @@ mod tests {
         assert_eq!(bmp.height(), 64);
         // Padding (10) followed by the 9-pixel cut mark.
         assert_eq!(bmp.width(), 19);
+    }
+
+    #[test]
+    fn feed_high_resolution_doubles_length_samples_only() {
+        let mut renderer = TextRenderer::new();
+        let elements = vec![LabelElement::Padding { pixels: 10 }, LabelElement::CutMark];
+        let bmp = render_elements_with_feed_scale(&elements, 64, "", 0, &mut renderer, 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bmp.height(), 64);
+        assert_eq!(bmp.width(), 38);
     }
 
     #[test]

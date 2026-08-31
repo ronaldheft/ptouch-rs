@@ -441,6 +441,23 @@ impl LabelBitmap {
         result
     }
 
+    /// Scale only along the tape-feed axis, preserving tape height.
+    pub fn scale_width(&self, factor: u32) -> LabelBitmap {
+        let factor = factor.max(1);
+        if factor == 1 || self.width == 0 || self.height == 0 {
+            return self.clone();
+        }
+        let mut result = LabelBitmap::new(self.width * factor, self.height);
+        for y in 0..self.height {
+            for x in 0..result.width {
+                if self.get_pixel(x / factor, y) {
+                    result.set_pixel(x, y, true);
+                }
+            }
+        }
+        result
+    }
+
     /// Access the raw packed bit data.
     pub fn data(&self) -> &[u8] {
         &self.data
