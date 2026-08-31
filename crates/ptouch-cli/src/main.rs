@@ -26,7 +26,7 @@ use ptouch_render::bitmap::LabelBitmap;
 use ptouch_render::document::{self, LabelDocument};
 use ptouch_render::image_loader;
 use ptouch_render::raster;
-use ptouch_render::text::{TextAlign, TextRenderStyle, TextRenderer};
+use ptouch_render::text::{TextAlign, TextRenderer};
 
 // ---------------------------------------------------------------------------
 // CLI argument definitions
@@ -71,7 +71,7 @@ struct PrintArgs {
     set: Vec<String>,
 
     /// Print one label per row of a CSV file ('-' for stdin); the header row
-    /// names the placeholders. With --output, include '{n}' for the row number.
+    /// names the placeholders. In output paths, use '{n}' for the row number.
     #[arg(long, value_name = "FILE")]
     csv: Option<String>,
 
@@ -91,9 +91,13 @@ struct PrintArgs {
     #[arg(long, value_enum, default_value = "auto")]
     binarize: BinarizeArg,
 
-    /// Export to PNG file instead of printing
+    /// Export a square-pixel physical preview instead of printing
     #[arg(short = 'o', long)]
     output: Option<String>,
+
+    /// Export the exact anisotropic printer raster instead of printing
+    #[arg(long)]
+    raster_output: Option<String>,
 
     /// Font name
     #[arg(short = 'f', long, default_value = "DejaVuSans")]
@@ -111,7 +115,7 @@ struct PrintArgs {
     #[arg(short = 'a', long, value_enum, default_value = "left")]
     align: AlignArg,
 
-    /// Force tape width in pixels (use with -o for image export without printer)
+    /// Force tape width in pixels (use with a file output, without a printer)
     #[arg(short = 'w', long)]
     tape_width: Option<u32>,
 
@@ -144,10 +148,6 @@ struct PrintArgs {
     /// Print quality (high and draft need a printer with quality modes)
     #[arg(long, value_enum, default_value = "standard")]
     quality: QualityArg,
-
-    /// Feed-axis resolution already present in input images
-    #[arg(long, value_enum, default_value = "standard")]
-    image_feed_resolution: ImageFeedResolutionArg,
 
     /// Number of copies
     #[arg(long, default_value = "1")]
@@ -195,12 +195,6 @@ enum QualityArg {
     Standard,
     High,
     Draft,
-}
-
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-enum ImageFeedResolutionArg {
-    Standard,
-    High,
 }
 
 impl QualityArg {
@@ -490,12 +484,6 @@ fn execute_print(args: &PrintArgs, ignored: &[String]) -> Result<(), Box<dyn std
         process::exit(1);
     }
 
-    if matches!(args.image_feed_resolution, ImageFeedResolutionArg::High)
-        && !matches!(args.quality, QualityArg::High)
-    {
-        return Err("--image-feed-resolution high requires --quality high".into());
-    }
-
     // Layout-only modifiers make no sense without a layout.
     if args.layout.is_none()
         && (!args.set.is_empty() || args.csv.is_some() || args.list_vars || args.allow_missing)
@@ -522,8 +510,8 @@ fn execute_print(args: &PrintArgs, ignored: &[String]) -> Result<(), Box<dyn std
         process::exit(1);
     }
 
-    if args.tape_width.is_some() && args.output.is_none() {
-        eprintln!("Error: --tape-width requires --output");
+    if args.tape_width.is_some() && !has_file_output(args) {
+        eprintln!("Error: --tape-width requires --output or --raster-output");
         process::exit(1);
     }
 
@@ -557,9 +545,7 @@ fn execute_print(args: &PrintArgs, ignored: &[String]) -> Result<(), Box<dyn std
     } else {
         1
     };
-    let image_feed_scale = image_feed_scale(args, feed_scale);
-    let bitmap = build_label(args, print_width, feed_scale, image_feed_scale)?
-        .mirrored(args.flip_h, args.flip_v);
+    let bitmap = build_label(args, print_width, feed_scale)?.mirrored(args.flip_h, args.flip_v);
     emit_label(&bitmap, args, max_px, device.as_mut(), feed_scale)?;
 
     if let Some(dev) = device {
@@ -593,12 +579,7 @@ fn print_layout(args: &PrintArgs, layout_path: &str) -> Result<(), Box<dyn std::
 
     let (print_width, max_px, mut device) = resolve_layout_target(args, &doc)?;
     let feed_scale = layout_feed_scale(args, &doc, device.as_ref());
-    let bitmap = render_layout(
-        &doc,
-        print_width,
-        feed_scale,
-        image_feed_scale(args, feed_scale),
-    )?;
+    let bitmap = render_layout(&doc, print_width, feed_scale)?;
     emit_label(&bitmap, args, max_px, device.as_mut(), feed_scale)?;
 
     if let Some(dev) = device {
@@ -619,6 +600,14 @@ fn print_layout_batch(
         && !output.contains("{n}")
     {
         eprintln!("Error: with --csv, --output must contain '{{n}}' (e.g. label-{{n}}.png)");
+        process::exit(1);
+    }
+    if let Some(output) = &args.raster_output
+        && !output.contains("{n}")
+    {
+        eprintln!(
+            "Error: with --csv, --raster-output must contain '{{n}}' (e.g. raster-{{n}}.png)"
+        );
         process::exit(1);
     }
 
@@ -647,23 +636,29 @@ fn print_layout_batch(
         let mut row_doc = doc.clone();
         row_doc.apply_values(&values);
         let feed_scale = layout_feed_scale(args, &row_doc, device.as_ref());
-        let bitmap = render_layout(
-            &row_doc,
-            print_width,
-            feed_scale,
-            image_feed_scale(args, feed_scale),
-        )?;
+        let bitmap = render_layout(&row_doc, print_width, feed_scale)?;
+        let printer_raster = bitmap.downsample_height(feed_scale);
 
         count += 1;
         if let Some(output) = &args.output {
             let path = output.replace("{n}", &count.to_string());
             bitmap.save(Path::new(&path))?;
-            println!("Saved row {} to '{}'", count, path);
-        } else if let Some(dev) = device.as_mut() {
-            print_to_device(dev, &bitmap, max_px, args)?;
-        } else {
-            eprintln!("Error: no output destination (use --output or connect a printer)");
-            process::exit(1);
+            println!("Saved row {} preview to '{}'", count, path);
+        }
+        if let Some(output) = &args.raster_output {
+            let path = output.replace("{n}", &count.to_string());
+            printer_raster.save(Path::new(&path))?;
+            println!("Saved row {} printer raster to '{}'", count, path);
+        }
+        if !has_file_output(args) {
+            if let Some(dev) = device.as_mut() {
+                print_to_device(dev, &printer_raster, max_px, args)?;
+            } else {
+                eprintln!(
+                    "Error: no output destination (use --output, --raster-output, or connect a printer)"
+                );
+                process::exit(1);
+            }
         }
     }
 
@@ -697,17 +692,15 @@ fn render_layout(
     doc: &LabelDocument,
     print_width: u32,
     feed_scale: u32,
-    image_feed_scale: u32,
 ) -> Result<LabelBitmap, Box<dyn std::error::Error>> {
     let mut renderer = TextRenderer::new();
-    let bitmap = document::render_elements_with_feed_scales(
+    let bitmap = document::render_elements_with_scale(
         &doc.elements,
         print_width,
         &doc.font_name,
         doc.font_margin,
         &mut renderer,
         feed_scale,
-        image_feed_scale,
     )?
     .ok_or_else(|| PtouchError::SendFailed("layout produced no output".to_string()))?;
     // The layout's saved whole-label flip is applied after composition.
@@ -728,17 +721,14 @@ fn layout_feed_scale(args: &PrintArgs, doc: &LabelDocument, device: Option<&Ptou
     if doc.dpi < 360 { 2 } else { 1 }
 }
 
-fn image_feed_scale(args: &PrintArgs, feed_scale: u32) -> u32 {
-    match args.image_feed_resolution {
-        ImageFeedResolutionArg::Standard => feed_scale,
-        ImageFeedResolutionArg::High => 1,
-    }
+fn has_file_output(args: &PrintArgs) -> bool {
+    args.output.is_some() || args.raster_output.is_some()
 }
 
 /// Resolve the print width, max pixels, and optional device for a layout.
 ///
-///   - `--tape-width`: forced PNG width (requires `--output`)
-///   - `--output` only: PNG export at the saved width, no printer needed
+///   - `--tape-width`: forced PNG width (requires a file output)
+///   - file output only: export at the saved width, no printer needed
 ///   - otherwise: print at the printer's actual width, warn on mismatch
 fn resolve_layout_target(
     args: &PrintArgs,
@@ -749,12 +739,12 @@ fn resolve_layout_target(
     let saved_px = tape::find_tape(doc.tape_width_mm, doc.dpi).map(|t| u32::from(t.pixels));
 
     if let Some(w) = args.tape_width {
-        if args.output.is_none() {
-            eprintln!("Error: --tape-width requires --output");
+        if !has_file_output(args) {
+            eprintln!("Error: --tape-width requires --output or --raster-output");
             process::exit(1);
         }
         Ok((w, w as u16, None))
-    } else if args.output.is_some() {
+    } else if has_file_output(args) {
         let w = saved_px.ok_or_else(|| {
             PtouchError::StatusError("unknown saved tape width; pass --tape-width".to_string())
         })?;
@@ -793,23 +783,40 @@ fn emit_label(
     device: Option<&mut PtouchDevice>,
     feed_scale: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let printer_raster = bitmap.downsample_height(feed_scale);
+    let dpi = device.as_ref().map_or(180, |d| d.device_info().dpi);
+    let feed_dpi = u32::from(dpi) * feed_scale.max(1);
+    let tape_mm = bitmap.width() as f64 / f64::from(feed_dpi) * 25.4;
+
     if let Some(ref output_path) = args.output {
         bitmap.save(Path::new(output_path))?;
-        let dpi = device.as_ref().map_or(180, |d| d.device_info().dpi);
-        let feed_dpi = u32::from(dpi) * feed_scale.max(1);
-        let tape_mm = bitmap.width() as f64 / f64::from(feed_dpi) * 25.4;
         println!(
-            "Saved to '{}' ({}x{} px, {:.1} mm of tape)",
+            "Saved preview to '{}' ({}x{} px, {:.1} mm of tape)",
             output_path,
             bitmap.width(),
             bitmap.height(),
             tape_mm
         );
-    } else if let Some(dev) = device {
-        print_to_device(dev, bitmap, max_px, args)?;
-    } else {
-        eprintln!("Error: no output destination (use --output or connect a printer)");
-        process::exit(1);
+    }
+    if let Some(ref output_path) = args.raster_output {
+        printer_raster.save(Path::new(output_path))?;
+        println!(
+            "Saved printer raster to '{}' ({}x{} px, {:.1} mm of tape)",
+            output_path,
+            printer_raster.width(),
+            printer_raster.height(),
+            tape_mm
+        );
+    }
+    if !has_file_output(args) {
+        if let Some(dev) = device {
+            print_to_device(dev, &printer_raster, max_px, args)?;
+        } else {
+            eprintln!(
+                "Error: no output destination (use --output, --raster-output, or connect a printer)"
+            );
+            process::exit(1);
+        }
     }
     Ok(())
 }
@@ -819,8 +826,8 @@ fn build_label(
     args: &PrintArgs,
     print_width: u32,
     feed_scale: u32,
-    image_feed_scale: u32,
 ) -> Result<LabelBitmap, Box<dyn std::error::Error>> {
+    let canvas_height = print_width * feed_scale.max(1);
     let mut result: Option<LabelBitmap> = None;
 
     // Render text if provided
@@ -838,16 +845,13 @@ fn build_label(
             args.align
         );
 
-        let text_bitmap = renderer.render_text_with_feed_scale(
+        let text_bitmap = renderer.render_text(
             &lines,
-            print_width,
+            canvas_height,
             &args.font,
-            TextRenderStyle {
-                font_size: args.size,
-                font_margin: args.margin,
-                align,
-                feed_scale,
-            },
+            args.size.map(|size| size * feed_scale as f32),
+            args.margin * feed_scale,
+            align,
         )?;
 
         result = Some(append_bitmap(result, text_bitmap));
@@ -858,25 +862,24 @@ fn build_label(
         debug!("Loading image: {}", img_path);
         let options = image_loader::ImageLoadOptions {
             binarize: args.binarize.to_binarize_mode(),
-            target_height: Some(print_width),
+            target_height: Some(canvas_height),
             ..image_loader::ImageLoadOptions::default()
         };
-        let img_bitmap =
-            image_loader::load_image(Path::new(img_path), &options)?.scale_width(image_feed_scale);
+        let img_bitmap = image_loader::load_image(Path::new(img_path), &options)?;
         result = Some(append_bitmap(result, img_bitmap));
     }
 
     // Add cut mark if requested
     if args.cut {
         debug!("Adding cut mark");
-        let mark = make_cutmark(print_width).scale_width(feed_scale);
+        let mark = make_cutmark(print_width).scale_to_height(canvas_height);
         result = Some(append_bitmap(result, mark));
     }
 
     // Add padding if requested
     if let Some(pad_px) = args.pad {
         debug!("Adding {} px padding", pad_px);
-        let pad = make_padding(print_width, pad_px).scale_width(feed_scale);
+        let pad = make_padding(print_width, pad_px).scale_to_height(canvas_height);
         result = Some(append_bitmap(result, pad));
     }
 
@@ -1015,7 +1018,7 @@ mod tests {
     }
 
     #[test]
-    fn test_native_image_feed_resolution_is_accepted_with_layout() {
+    fn test_preview_and_printer_raster_outputs_are_accepted_together() {
         let matches = print_matches(&[
             "ptouch",
             "print",
@@ -1023,15 +1026,19 @@ mod tests {
             "x.ptl",
             "--quality",
             "high",
-            "--image-feed-resolution",
-            "high",
+            "--output",
+            "preview.png",
+            "--raster-output",
+            "printer.png",
         ]);
         let (_, print) = matches.subcommand().unwrap();
         assert_eq!(
-            print
-                .get_one::<ImageFeedResolutionArg>("image_feed_resolution")
-                .copied(),
-            Some(ImageFeedResolutionArg::High),
+            print.get_one::<String>("output").map(String::as_str),
+            Some("preview.png"),
+        );
+        assert_eq!(
+            print.get_one::<String>("raster_output").map(String::as_str),
+            Some("printer.png"),
         );
     }
 

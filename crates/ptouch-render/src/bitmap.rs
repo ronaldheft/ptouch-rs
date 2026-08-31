@@ -441,16 +441,22 @@ impl LabelBitmap {
         result
     }
 
-    /// Scale only along the tape-feed axis, preserving tape height.
-    pub fn scale_width(&self, factor: u32) -> LabelBitmap {
+    /// Reduce tape-height samples while preserving tape-feed samples.
+    ///
+    /// Each output row samples the center row of its source group. This turns
+    /// a square-pixel working canvas into the anisotropic raster expected by a
+    /// printer whose feed-axis resolution is a multiple of its head resolution.
+    pub fn downsample_height(&self, factor: u32) -> LabelBitmap {
         let factor = factor.max(1);
         if factor == 1 || self.width == 0 || self.height == 0 {
             return self.clone();
         }
-        let mut result = LabelBitmap::new(self.width * factor, self.height);
-        for y in 0..self.height {
-            for x in 0..result.width {
-                if self.get_pixel(x / factor, y) {
+        let target_height = self.height / factor;
+        let mut result = LabelBitmap::new(self.width, target_height);
+        for y in 0..target_height {
+            let source_y = (y * factor + factor / 2).min(self.height - 1);
+            for x in 0..self.width {
+                if self.get_pixel(x, source_y) {
                     result.set_pixel(x, y, true);
                 }
             }
@@ -529,6 +535,23 @@ mod tests {
         assert_eq!(c.height(), 8);
         assert!(c.get_pixel(0, 0));
         assert!(c.get_pixel(5, 1));
+    }
+
+    #[test]
+    fn test_downsample_height_preserves_width_and_samples_center_rows() {
+        let mut bmp = LabelBitmap::new(3, 4);
+        bmp.set_pixel(0, 0, true);
+        bmp.set_pixel(1, 1, true);
+        bmp.set_pixel(2, 2, true);
+        bmp.set_pixel(0, 3, true);
+
+        let sampled = bmp.downsample_height(2);
+        assert_eq!(sampled.width(), 3);
+        assert_eq!(sampled.height(), 2);
+        assert!(!sampled.get_pixel(0, 0));
+        assert!(sampled.get_pixel(1, 0));
+        assert!(sampled.get_pixel(0, 1));
+        assert!(!sampled.get_pixel(2, 1));
     }
 
     #[test]

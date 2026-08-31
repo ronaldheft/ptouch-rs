@@ -96,8 +96,9 @@ ptouch print "Label" -f "DejaVu Sans" -s 32 -a center
 # Print image (PNG, JPEG, BMP, SVG, etc.)
 ptouch print -i logo.png
 
-# Print an image already sampled for the printer's high-resolution feed axis
-ptouch print -i label-180x360.png --quality high --image-feed-resolution high
+# Preview a high-resolution print and inspect its exact printer raster
+ptouch print -i label-360dpi.png --quality high \
+  --output preview.png --raster-output printer-raster.png
 
 # Text + image + cut mark
 ptouch print "Name" -i photo.png -c
@@ -122,11 +123,12 @@ ptouch info
 ptouch list
 ```
 
-With native feed-axis high resolution, `--quality high` normally adds the
-extra samples while rendering text and images. Use
-`--image-feed-resolution high` only when supplied or embedded images already
-contain those samples; generated text, cut marks, and padding are still
-rendered at high resolution. This avoids widening pre-rendered images twice.
+For printers with native feed-axis high resolution, `--quality high` renders
+the complete label on a square-pixel working canvas before converting it to
+the printer's anisotropic raster. `--output` saves the physical preview, while
+`--raster-output` saves the exact rows sent to the printer. Supply images at
+the preview resolution; the printer raster is derived without stretching the
+preview.
 
 ### Layout templates and batch printing
 

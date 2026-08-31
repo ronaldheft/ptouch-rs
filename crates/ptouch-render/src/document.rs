@@ -20,7 +20,7 @@ use crate::Result;
 use crate::bitmap::LabelBitmap;
 use crate::compose;
 use crate::image_loader::{self, ImageLoadOptions};
-use crate::text::{TextAlign, TextRenderStyle, TextRenderer};
+use crate::text::{TextAlign, TextRenderer};
 
 /// Current on-disk layout format version.
 pub const DOCUMENT_VERSION: u32 = 1;
@@ -300,7 +300,6 @@ struct FontSettings<'a> {
 #[derive(Clone, Copy)]
 struct RenderGeometry {
     tape_width_px: u32,
-    feed_scale: u32,
 }
 
 /// Render an ordered element list into a single label bitmap.
@@ -316,47 +315,26 @@ pub fn render_elements(
     font_margin: u32,
     renderer: &mut TextRenderer,
 ) -> Result<Option<LabelBitmap>> {
-    render_elements_with_feed_scale(elements, tape_width_px, font_name, font_margin, renderer, 1)
+    render_elements_with_scale(elements, tape_width_px, font_name, font_margin, renderer, 1)
 }
 
-/// Render elements with extra samples along the tape-feed axis while
-/// preserving the tape-width pixel count.
-pub fn render_elements_with_feed_scale(
-    elements: &[LabelElement],
-    tape_width_px: u32,
-    font_name: &str,
-    font_margin: u32,
-    renderer: &mut TextRenderer,
-    feed_scale: u32,
-) -> Result<Option<LabelBitmap>> {
-    render_elements_with_feed_scales(
-        elements,
-        tape_width_px,
-        font_name,
-        font_margin,
-        renderer,
-        feed_scale,
-        feed_scale,
-    )
-}
-
-/// Render elements with independent feed-axis scales for generated content
-/// and externally supplied images.
+/// Render elements on a square-pixel working canvas.
 ///
-/// `feed_scale` applies to generated text, cut marks, and padding.
-/// `image_feed_scale` lets callers preserve images that already contain native
-/// high-resolution samples instead of widening them a second time.
-pub fn render_elements_with_feed_scales(
+/// A scale of two doubles both axes, preserving the label's physical shape
+/// while adding samples for a high-resolution printer mode. The caller can
+/// later reduce only the tape-height samples to form an anisotropic printer
+/// raster.
+pub fn render_elements_with_scale(
     elements: &[LabelElement],
     tape_width_px: u32,
     font_name: &str,
     font_margin: u32,
     renderer: &mut TextRenderer,
-    feed_scale: u32,
-    image_feed_scale: u32,
+    scale: u32,
 ) -> Result<Option<LabelBitmap>> {
-    let feed_scale = feed_scale.max(1);
-    let image_feed_scale = image_feed_scale.max(1);
+    let scale = scale.max(1);
+    let canvas_height = tape_width_px * scale;
+    let scaled_margin = font_margin * scale;
     let mut result: Option<LabelBitmap> = None;
 
     for element in elements {
@@ -371,16 +349,15 @@ pub fn render_elements_with_feed_scales(
             } => match render_text_segment(
                 renderer,
                 content,
-                *font_size,
+                font_size.map(|size| size * scale as f32),
                 *align,
                 *rotation,
                 RenderGeometry {
-                    tape_width_px,
-                    feed_scale,
+                    tape_width_px: canvas_height,
                 },
                 &FontSettings {
                     name: font_name,
-                    margin: font_margin,
+                    margin: scaled_margin,
                 },
             ) {
                 Some(seg) => seg.mirrored(*flip_h, *flip_v),
@@ -398,20 +375,16 @@ pub fn render_elements_with_feed_scales(
                 bitmap.as_ref(),
                 image_data,
                 *rotation,
-                *target_height,
-                tape_width_px,
+                target_height.map(|height| height * scale),
+                canvas_height,
             ) {
                 Some(seg) => seg.mirrored(*flip_h, *flip_v),
                 None => continue,
             },
-            LabelElement::CutMark => compose::cutmark(tape_width_px),
-            LabelElement::Padding { pixels } => compose::padding(tape_width_px, *pixels),
-        };
-
-        let segment = match element {
-            LabelElement::Text { rotation, .. } if !is_rotated(*rotation) => segment,
-            LabelElement::Image { .. } => segment.scale_width(image_feed_scale),
-            _ => segment.scale_width(feed_scale),
+            LabelElement::CutMark => compose::cutmark(tape_width_px).scale_to_height(canvas_height),
+            LabelElement::Padding { pixels } => {
+                compose::padding(tape_width_px, *pixels).scale_to_height(canvas_height)
+            }
         };
         result = Some(match result {
             Some(prev) => prev.append(&segment),
@@ -457,28 +430,14 @@ fn render_text_segment(
         geometry.tape_width_px
     };
 
-    let rendered = if is_rotated {
-        renderer.render_text(
-            &lines,
-            render_height,
-            font.name,
-            effective_font_size,
-            font.margin,
-            align,
-        )
-    } else {
-        renderer.render_text_with_feed_scale(
-            &lines,
-            render_height,
-            font.name,
-            TextRenderStyle {
-                font_size: effective_font_size,
-                font_margin: font.margin,
-                align,
-                feed_scale: geometry.feed_scale,
-            },
-        )
-    };
+    let rendered = renderer.render_text(
+        &lines,
+        render_height,
+        font.name,
+        effective_font_size,
+        font.margin,
+        align,
+    );
     let bmp = match rendered {
         Ok(bmp) => bmp,
         Err(e) => {
@@ -758,35 +717,29 @@ mod tests {
     }
 
     #[test]
-    fn feed_high_resolution_doubles_length_samples_only() {
+    fn high_resolution_doubles_both_canvas_axes() {
         let mut renderer = TextRenderer::new();
         let elements = vec![LabelElement::Padding { pixels: 10 }, LabelElement::CutMark];
-        let bmp = render_elements_with_feed_scale(&elements, 64, "", 0, &mut renderer, 2)
+        let bmp = render_elements_with_scale(&elements, 64, "", 0, &mut renderer, 2)
             .unwrap()
             .unwrap();
-        assert_eq!(bmp.height(), 64);
+        assert_eq!(bmp.height(), 128);
         assert_eq!(bmp.width(), 38);
     }
 
     #[test]
-    fn feed_high_resolution_preserves_native_resolution_images() {
-        let elements = vec![
-            LabelElement::image_from_bytes(None, png_bytes(80, 40)),
-            LabelElement::Padding { pixels: 10 },
-        ];
+    fn high_resolution_uses_square_pixel_canvas_before_printer_sampling() {
+        let elements = vec![LabelElement::image_from_bytes(None, png_bytes(256, 128))];
         let mut renderer = TextRenderer::new();
-        let standard_input =
-            render_elements_with_feed_scale(&elements, 64, "", 0, &mut renderer, 2)
-                .unwrap()
-                .unwrap();
-        assert_eq!(standard_input.width(), 276);
-
-        let mut renderer = TextRenderer::new();
-        let bmp = render_elements_with_feed_scales(&elements, 64, "", 0, &mut renderer, 2, 1)
+        let preview = render_elements_with_scale(&elements, 64, "", 0, &mut renderer, 2)
             .unwrap()
             .unwrap();
-        assert_eq!(bmp.height(), 64);
-        assert_eq!(bmp.width(), 148);
+        assert_eq!(preview.width(), 256);
+        assert_eq!(preview.height(), 128);
+
+        let printer = preview.downsample_height(2);
+        assert_eq!(printer.width(), 256);
+        assert_eq!(printer.height(), 64);
     }
 
     #[test]

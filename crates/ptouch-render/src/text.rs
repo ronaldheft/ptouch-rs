@@ -36,15 +36,6 @@ impl TextAlign {
     }
 }
 
-/// Typography and feed-axis sampling for one text element.
-#[derive(Debug, Clone, Copy)]
-pub struct TextRenderStyle {
-    pub font_size: Option<f32>,
-    pub font_margin: u32,
-    pub align: TextAlign,
-    pub feed_scale: u32,
-}
-
 /// Text renderer backed by cosmic-text.
 pub struct TextRenderer {
     font_system: FontSystem,
@@ -203,47 +194,6 @@ impl TextRenderer {
 
         Ok(bitmap)
     }
-
-    /// Render additional samples along the tape-feed axis without changing
-    /// the tape-width pixel count.
-    pub fn render_text_with_feed_scale(
-        &mut self,
-        lines: &[&str],
-        print_width: u32,
-        font_name: &str,
-        style: TextRenderStyle,
-    ) -> Result<LabelBitmap> {
-        let feed_scale = style.feed_scale.max(1);
-        if feed_scale == 1 {
-            return self.render_text(
-                lines,
-                print_width,
-                font_name,
-                style.font_size,
-                style.font_margin,
-                style.align,
-            );
-        }
-
-        let sampled = self.render_text(
-            lines,
-            print_width * feed_scale,
-            font_name,
-            style.font_size.map(|size| size * feed_scale as f32),
-            style.font_margin * feed_scale,
-            style.align,
-        )?;
-        let mut result = LabelBitmap::new(sampled.width(), print_width);
-        for y in 0..print_width {
-            let source_y = (y * feed_scale + feed_scale / 2).min(sampled.height() - 1);
-            for x in 0..sampled.width() {
-                if sampled.get_pixel(x, source_y) {
-                    result.set_pixel(x, y, true);
-                }
-            }
-        }
-        Ok(result)
-    }
 }
 
 #[cfg(test)]
@@ -282,28 +232,5 @@ mod tests {
             assert!(bmp.width() > 0);
             assert_eq!(bmp.height(), 64);
         }
-    }
-
-    #[test]
-    fn high_resolution_text_contains_unique_feed_samples() {
-        let mut renderer = TextRenderer::new();
-        let high = renderer
-            .render_text_with_feed_scale(
-                &["Readable label"],
-                64,
-                "",
-                TextRenderStyle {
-                    font_size: Some(18.0),
-                    font_margin: 2,
-                    align: TextAlign::Left,
-                    feed_scale: 2,
-                },
-            )
-            .unwrap();
-        assert_eq!(high.height(), 64);
-        assert!(high.width() > 0);
-        assert!((0..high.height()).any(|y| {
-            (0..high.width() / 2).any(|x| high.get_pixel(x * 2, y) != high.get_pixel(x * 2 + 1, y))
-        }));
     }
 }
