@@ -32,7 +32,7 @@ jobs:
             target: aarch64-apple-darwin
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -51,14 +51,14 @@ jobs:
         run: cargo build --release --workspace --verbose --target ${{ matrix.target }}
 
       - name: Upload CLI artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ptouch-${{ matrix.asset_suffix }}
           path: target/${{ matrix.target }}/release/${{ matrix.artifact_cli }}
           if-no-files-found: error
 
       - name: Upload GUI artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ptouch-gui-${{ matrix.asset_suffix }}
           path: target/${{ matrix.target }}/release/${{ matrix.artifact_gui }}
@@ -80,7 +80,7 @@ jobs:
 
       - name: Upload macOS .app bundle
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ptouch-gui-${{ matrix.asset_suffix }}-app
           path: ptouch-gui-${{ matrix.asset_suffix }}.app.zip
@@ -101,7 +101,7 @@ jobs:
 
       - name: Upload Linux packages
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ptouch-linux-packages
           path: dist/*
@@ -114,10 +114,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -135,7 +135,7 @@ jobs:
           cp artifacts/ptouch-linux-packages/*.rpm release/
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: release/*
           generate_release_notes: true
