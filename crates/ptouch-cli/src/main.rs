@@ -145,6 +145,10 @@ struct PrintArgs {
     #[arg(long, value_enum, default_value = "standard")]
     quality: QualityArg,
 
+    /// Feed-axis resolution already present in input images
+    #[arg(long, value_enum, default_value = "standard")]
+    image_feed_resolution: ImageFeedResolutionArg,
+
     /// Number of copies
     #[arg(long, default_value = "1")]
     copies: u32,
@@ -191,6 +195,12 @@ enum QualityArg {
     Standard,
     High,
     Draft,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageFeedResolutionArg {
+    Standard,
+    High,
 }
 
 impl QualityArg {
@@ -480,6 +490,12 @@ fn execute_print(args: &PrintArgs, ignored: &[String]) -> Result<(), Box<dyn std
         process::exit(1);
     }
 
+    if matches!(args.image_feed_resolution, ImageFeedResolutionArg::High)
+        && !matches!(args.quality, QualityArg::High)
+    {
+        return Err("--image-feed-resolution high requires --quality high".into());
+    }
+
     // Layout-only modifiers make no sense without a layout.
     if args.layout.is_none()
         && (!args.set.is_empty() || args.csv.is_some() || args.list_vars || args.allow_missing)
@@ -541,7 +557,9 @@ fn execute_print(args: &PrintArgs, ignored: &[String]) -> Result<(), Box<dyn std
     } else {
         1
     };
-    let bitmap = build_label(args, print_width, feed_scale)?.mirrored(args.flip_h, args.flip_v);
+    let image_feed_scale = image_feed_scale(args, feed_scale);
+    let bitmap = build_label(args, print_width, feed_scale, image_feed_scale)?
+        .mirrored(args.flip_h, args.flip_v);
     emit_label(&bitmap, args, max_px, device.as_mut(), feed_scale)?;
 
     if let Some(dev) = device {
@@ -575,7 +593,12 @@ fn print_layout(args: &PrintArgs, layout_path: &str) -> Result<(), Box<dyn std::
 
     let (print_width, max_px, mut device) = resolve_layout_target(args, &doc)?;
     let feed_scale = layout_feed_scale(args, &doc, device.as_ref());
-    let bitmap = render_layout(&doc, print_width, feed_scale)?;
+    let bitmap = render_layout(
+        &doc,
+        print_width,
+        feed_scale,
+        image_feed_scale(args, feed_scale),
+    )?;
     emit_label(&bitmap, args, max_px, device.as_mut(), feed_scale)?;
 
     if let Some(dev) = device {
@@ -624,7 +647,12 @@ fn print_layout_batch(
         let mut row_doc = doc.clone();
         row_doc.apply_values(&values);
         let feed_scale = layout_feed_scale(args, &row_doc, device.as_ref());
-        let bitmap = render_layout(&row_doc, print_width, feed_scale)?;
+        let bitmap = render_layout(
+            &row_doc,
+            print_width,
+            feed_scale,
+            image_feed_scale(args, feed_scale),
+        )?;
 
         count += 1;
         if let Some(output) = &args.output {
@@ -669,15 +697,17 @@ fn render_layout(
     doc: &LabelDocument,
     print_width: u32,
     feed_scale: u32,
+    image_feed_scale: u32,
 ) -> Result<LabelBitmap, Box<dyn std::error::Error>> {
     let mut renderer = TextRenderer::new();
-    let bitmap = document::render_elements_with_feed_scale(
+    let bitmap = document::render_elements_with_feed_scales(
         &doc.elements,
         print_width,
         &doc.font_name,
         doc.font_margin,
         &mut renderer,
         feed_scale,
+        image_feed_scale,
     )?
     .ok_or_else(|| PtouchError::SendFailed("layout produced no output".to_string()))?;
     // The layout's saved whole-label flip is applied after composition.
@@ -696,6 +726,13 @@ fn layout_feed_scale(args: &PrintArgs, doc: &LabelDocument, device: Option<&Ptou
         };
     }
     if doc.dpi < 360 { 2 } else { 1 }
+}
+
+fn image_feed_scale(args: &PrintArgs, feed_scale: u32) -> u32 {
+    match args.image_feed_resolution {
+        ImageFeedResolutionArg::Standard => feed_scale,
+        ImageFeedResolutionArg::High => 1,
+    }
 }
 
 /// Resolve the print width, max pixels, and optional device for a layout.
@@ -782,6 +819,7 @@ fn build_label(
     args: &PrintArgs,
     print_width: u32,
     feed_scale: u32,
+    image_feed_scale: u32,
 ) -> Result<LabelBitmap, Box<dyn std::error::Error>> {
     let mut result: Option<LabelBitmap> = None;
 
@@ -824,7 +862,7 @@ fn build_label(
             ..image_loader::ImageLoadOptions::default()
         };
         let img_bitmap =
-            image_loader::load_image(Path::new(img_path), &options)?.scale_width(feed_scale);
+            image_loader::load_image(Path::new(img_path), &options)?.scale_width(image_feed_scale);
         result = Some(append_bitmap(result, img_bitmap));
     }
 
@@ -973,6 +1011,27 @@ mod tests {
             ignored.is_empty(),
             "unexpected ignored flags: {:?}",
             ignored
+        );
+    }
+
+    #[test]
+    fn test_native_image_feed_resolution_is_accepted_with_layout() {
+        let matches = print_matches(&[
+            "ptouch",
+            "print",
+            "--layout",
+            "x.ptl",
+            "--quality",
+            "high",
+            "--image-feed-resolution",
+            "high",
+        ]);
+        let (_, print) = matches.subcommand().unwrap();
+        assert_eq!(
+            print
+                .get_one::<ImageFeedResolutionArg>("image_feed_resolution")
+                .copied(),
+            Some(ImageFeedResolutionArg::High),
         );
     }
 

@@ -329,7 +329,34 @@ pub fn render_elements_with_feed_scale(
     renderer: &mut TextRenderer,
     feed_scale: u32,
 ) -> Result<Option<LabelBitmap>> {
+    render_elements_with_feed_scales(
+        elements,
+        tape_width_px,
+        font_name,
+        font_margin,
+        renderer,
+        feed_scale,
+        feed_scale,
+    )
+}
+
+/// Render elements with independent feed-axis scales for generated content
+/// and externally supplied images.
+///
+/// `feed_scale` applies to generated text, cut marks, and padding.
+/// `image_feed_scale` lets callers preserve images that already contain native
+/// high-resolution samples instead of widening them a second time.
+pub fn render_elements_with_feed_scales(
+    elements: &[LabelElement],
+    tape_width_px: u32,
+    font_name: &str,
+    font_margin: u32,
+    renderer: &mut TextRenderer,
+    feed_scale: u32,
+    image_feed_scale: u32,
+) -> Result<Option<LabelBitmap>> {
     let feed_scale = feed_scale.max(1);
+    let image_feed_scale = image_feed_scale.max(1);
     let mut result: Option<LabelBitmap> = None;
 
     for element in elements {
@@ -383,6 +410,7 @@ pub fn render_elements_with_feed_scale(
 
         let segment = match element {
             LabelElement::Text { rotation, .. } if !is_rotated(*rotation) => segment,
+            LabelElement::Image { .. } => segment.scale_width(image_feed_scale),
             _ => segment.scale_width(feed_scale),
         };
         result = Some(match result {
@@ -738,6 +766,27 @@ mod tests {
             .unwrap();
         assert_eq!(bmp.height(), 64);
         assert_eq!(bmp.width(), 38);
+    }
+
+    #[test]
+    fn feed_high_resolution_preserves_native_resolution_images() {
+        let elements = vec![
+            LabelElement::image_from_bytes(None, png_bytes(80, 40)),
+            LabelElement::Padding { pixels: 10 },
+        ];
+        let mut renderer = TextRenderer::new();
+        let standard_input =
+            render_elements_with_feed_scale(&elements, 64, "", 0, &mut renderer, 2)
+                .unwrap()
+                .unwrap();
+        assert_eq!(standard_input.width(), 276);
+
+        let mut renderer = TextRenderer::new();
+        let bmp = render_elements_with_feed_scales(&elements, 64, "", 0, &mut renderer, 2, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bmp.height(), 64);
+        assert_eq!(bmp.width(), 148);
     }
 
     #[test]
