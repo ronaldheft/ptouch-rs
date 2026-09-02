@@ -33,6 +33,38 @@ pub enum PrintQuality {
     Draft,
 }
 
+/// Return whether a device supports the requested print quality.
+pub fn supports_print_quality(flags: DeviceFlags, quality: PrintQuality) -> bool {
+    match quality {
+        PrintQuality::Standard => true,
+        PrintQuality::HighRes => {
+            flags.intersects(DeviceFlags::LEGACY_HIRES | DeviceFlags::FEED_HIRES)
+        }
+        PrintQuality::Draft => flags.contains(DeviceFlags::LEGACY_HIRES),
+    }
+}
+
+/// Feed-axis resolution multiplier the renderer must provide.
+///
+/// Legacy high-resolution devices expand raster lines in the protocol layer,
+/// while native devices consume caller-rendered feed samples. With no device,
+/// high-resolution export uses the native 2x geometry.
+pub fn render_feed_scale(quality: PrintQuality, flags: Option<DeviceFlags>) -> u16 {
+    if quality != PrintQuality::HighRes {
+        return 1;
+    }
+    match flags {
+        Some(flags)
+            if flags.contains(DeviceFlags::FEED_HIRES)
+                && !flags.contains(DeviceFlags::LEGACY_HIRES) =>
+        {
+            2
+        }
+        Some(_) => 1,
+        None => 2,
+    }
+}
+
 /// Construct the initialization sequence.
 ///
 /// Sends 100 zero bytes followed by the ESC @ (initialize) command.
@@ -301,14 +333,10 @@ pub fn build_print_job(lines: &[Vec<u8>], flags: DeviceFlags, opts: &JobOptions)
     // keep physical length by duplicating lines (high resolution) or dropping
     // every other line (draft). Native feed-resolution devices receive the
     // caller-rendered high-resolution lines unchanged.
-    let quality = match opts.quality {
-        PrintQuality::HighRes
-            if flags.intersects(DeviceFlags::LEGACY_HIRES | DeviceFlags::FEED_HIRES) =>
-        {
-            PrintQuality::HighRes
-        }
-        PrintQuality::Draft if flags.contains(DeviceFlags::LEGACY_HIRES) => PrintQuality::Draft,
-        _ => PrintQuality::Standard,
+    let quality = if supports_print_quality(flags, opts.quality) {
+        opts.quality
+    } else {
+        PrintQuality::Standard
     };
     let (repeat, step) = if flags.contains(DeviceFlags::LEGACY_HIRES) {
         match quality {
@@ -699,6 +727,23 @@ mod tests {
                 .any(|window| window == [0x1B, 0x69, 0x4B, 0x4c])
         );
         assert_eq!(bytes.iter().filter(|&&byte| byte == 0x47).count(), 2);
+    }
+
+    #[test]
+    fn test_render_feed_scale_distinguishes_native_legacy_and_offline_targets() {
+        assert_eq!(
+            render_feed_scale(PrintQuality::HighRes, Some(DeviceFlags::FEED_HIRES)),
+            2
+        );
+        assert_eq!(
+            render_feed_scale(PrintQuality::HighRes, Some(DeviceFlags::LEGACY_HIRES)),
+            1
+        );
+        assert_eq!(
+            render_feed_scale(PrintQuality::Standard, Some(DeviceFlags::FEED_HIRES)),
+            1
+        );
+        assert_eq!(render_feed_scale(PrintQuality::HighRes, None), 2);
     }
 
     #[test]

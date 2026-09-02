@@ -6,6 +6,8 @@
 use crate::bitmap::LabelBitmap;
 use image::GrayImage;
 use log::error;
+use ptouch_core::device::DeviceFlags;
+use ptouch_core::protocol::{PrintQuality, render_feed_scale};
 
 use crate::document::{FontSizeUnit, LabelDocument, LabelElement, LayoutMode};
 use crate::text::TextRenderer;
@@ -20,6 +22,22 @@ pub struct RenderTarget {
     pub cross_dpi: u16,
     /// Resolution along the tape feed direction.
     pub feed_dpi: u16,
+}
+
+impl RenderTarget {
+    /// Build target geometry from print quality and optional device capabilities.
+    pub fn for_print_quality(
+        tape_width_px: u32,
+        cross_dpi: u16,
+        quality: PrintQuality,
+        flags: Option<DeviceFlags>,
+    ) -> Self {
+        Self {
+            tape_width_px,
+            cross_dpi,
+            feed_dpi: cross_dpi.saturating_mul(render_feed_scale(quality, flags)),
+        }
+    }
 }
 
 /// Rectangle in logical document pixels.
@@ -71,6 +89,11 @@ pub fn render_document(document: &LabelDocument, target: RenderTarget) -> Result
     if document.dpi == 0 || target.cross_dpi == 0 || target.feed_dpi == 0 {
         return Err(RenderError::Layout(
             "document and target resolutions must be greater than zero".to_string(),
+        ));
+    }
+    if document.layout == LayoutMode::Positioned && document.version < 2 {
+        return Err(RenderError::Layout(
+            "positioned layout requires layout version 2".to_string(),
         ));
     }
     if document.layout == LayoutMode::Flow {
@@ -497,6 +520,35 @@ mod tests {
         assert!(rendered.printer_raster.get_pixel(2, 1));
         assert!(rendered.printer_raster.get_pixel(5, 4));
         assert!(!rendered.printer_raster.get_pixel(6, 4));
+    }
+
+    #[test]
+    fn renderer_rejects_programmatic_version_one_positioned_documents() {
+        let document = LabelDocument {
+            version: 1,
+            tape_width_mm: 24,
+            dpi: 180,
+            layout: LayoutMode::Positioned,
+            min_length: 10,
+            end_padding: 0,
+            font_name: "sans-serif".to_string(),
+            font_margin: 0,
+            flip_h: false,
+            flip_v: false,
+            elements: Vec::new(),
+        };
+
+        let error = render_document(
+            &document,
+            RenderTarget {
+                tape_width_px: 128,
+                cross_dpi: 180,
+                feed_dpi: 180,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("requires layout version 2"));
     }
 
     #[test]

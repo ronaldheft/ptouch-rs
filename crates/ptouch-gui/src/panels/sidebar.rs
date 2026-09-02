@@ -5,7 +5,8 @@
 
 use log::info;
 
-use ptouch_core::protocol::PrintQuality;
+use ptouch_core::device::DeviceFlags;
+use ptouch_core::protocol::{PrintQuality, supports_print_quality};
 use ptouch_core::tape;
 use ptouch_render::document::{FontSizeUnit, LayoutMode};
 
@@ -162,7 +163,10 @@ fn show_print_options(ui: &mut egui::Ui, state: &mut AppState) {
         ui.add(crate::widgets::toggle(&mut state.auto_cut));
     });
 
-    if state.printer_quality_modes {
+    if state
+        .printer_flags
+        .is_some_and(|flags| flags.intersects(DeviceFlags::LEGACY_HIRES | DeviceFlags::FEED_HIRES))
+    {
         let quality_label = |q: PrintQuality| match q {
             PrintQuality::Standard => "Standard",
             PrintQuality::HighRes => "High resolution",
@@ -179,7 +183,9 @@ fn show_print_options(ui: &mut egui::Ui, state: &mut AppState) {
                 ]
                 .into_iter()
                 .filter(|quality| {
-                    *quality != PrintQuality::Draft || !state.printer_native_feed_hires
+                    state
+                        .printer_flags
+                        .is_some_and(|flags| supports_print_quality(flags, *quality))
                 }) {
                     ui.selectable_value(&mut state.print_quality, q, quality_label(q));
                 }

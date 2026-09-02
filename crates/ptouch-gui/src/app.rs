@@ -7,7 +7,6 @@ use std::sync::mpsc;
 
 use log::{error, info};
 
-use ptouch_core::protocol::PrintQuality;
 use ptouch_render::layout::{RenderTarget, render_document};
 
 use crate::panels;
@@ -60,18 +59,12 @@ impl PtouchApp {
             return;
         }
 
-        let feed_scale = if self.state.print_quality == PrintQuality::HighRes
-            && self.state.printer_native_feed_hires
-        {
-            2
-        } else {
-            1
-        };
-        let target = RenderTarget {
-            tape_width_px: self.state.tape_width_px,
-            cross_dpi: self.state.printer_dpi,
-            feed_dpi: self.state.printer_dpi.saturating_mul(feed_scale),
-        };
+        let target = RenderTarget::for_print_quality(
+            self.state.tape_width_px,
+            self.state.printer_dpi,
+            self.state.print_quality,
+            self.state.printer_flags,
+        );
         let result = match render_document(&self.state.to_document(), target) {
             Ok(result) => Some(result),
             Err(e) => {
@@ -136,23 +129,22 @@ impl eframe::App for PtouchApp {
                     media_type,
                     max_px,
                     dpi,
-                    quality_modes,
-                    native_feed_hires,
+                    flags,
                 } => {
                     let old_dpi = self.state.printer_dpi;
-                    let old_native_feed_hires = self.state.printer_native_feed_hires;
+                    let old_flags = self.state.printer_flags;
                     let old_quality = self.state.print_quality;
                     self.state.printer_connected = true;
                     self.state.operation_in_progress = false;
                     self.state.printer_max_px = max_px;
                     self.state.printer_dpi = dpi;
-                    self.state.printer_quality_modes = quality_modes;
-                    self.state.printer_native_feed_hires = native_feed_hires;
+                    self.state.printer_flags = Some(flags);
                     // A stale non-standard quality from a previous printer
                     // would make every print fail with the selector hidden.
-                    if !quality_modes
-                        || (native_feed_hires && self.state.print_quality == PrintQuality::Draft)
-                    {
+                    if !ptouch_core::protocol::supports_print_quality(
+                        flags,
+                        self.state.print_quality,
+                    ) {
                         self.state.print_quality = ptouch_core::protocol::PrintQuality::Standard;
                     }
                     self.state.printer_model =
@@ -167,7 +159,7 @@ impl eframe::App for PtouchApp {
                     self.state.update_tape_pixels();
                     if self.state.tape_width_px != old_px
                         || self.state.printer_dpi != old_dpi
-                        || self.state.printer_native_feed_hires != old_native_feed_hires
+                        || self.state.printer_flags != old_flags
                         || self.state.print_quality != old_quality
                     {
                         self.state.mark_dirty();

@@ -5,6 +5,7 @@
 
 use std::sync::mpsc;
 
+use ptouch_core::device::DeviceFlags;
 use ptouch_core::protocol::PrintQuality;
 use ptouch_render::bitmap::LabelBitmap;
 use ptouch_render::document::{LabelDocument, LayoutMode};
@@ -36,8 +37,7 @@ pub enum PrinterResponse {
         media_type: String,
         max_px: u16,
         dpi: u16,
-        quality_modes: bool,
-        native_feed_hires: bool,
+        flags: DeviceFlags,
     },
     /// No printer found or previously connected printer lost.
     Disconnected,
@@ -113,10 +113,8 @@ pub struct AppState {
     /// Kept across disconnects so the canvas does not resize on a
     /// transient USB glitch.
     pub printer_dpi: u16,
-    /// Whether the last connected printer supports print quality modes.
-    pub printer_quality_modes: bool,
-    /// Whether high quality accepts caller-rendered 2x feed samples.
-    pub printer_native_feed_hires: bool,
+    /// Capabilities of the last connected printer.
+    pub printer_flags: Option<DeviceFlags>,
     /// Selected print quality for the next print job.
     pub print_quality: PrintQuality,
     /// Channel sender for commands to the printer worker thread.
@@ -156,8 +154,7 @@ impl Default for AppState {
             operation_in_progress: false,
             printer_max_px: 0,
             printer_dpi: 180,
-            printer_quality_modes: false,
-            printer_native_feed_hires: false,
+            printer_flags: None,
             print_quality: PrintQuality::Standard,
             printer_cmd_tx: None,
         }

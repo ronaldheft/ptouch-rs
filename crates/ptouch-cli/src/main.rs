@@ -18,16 +18,16 @@ use log::debug;
 
 use ptouch_core::device::{self, DeviceFlags, DeviceInfo};
 use ptouch_core::error::PtouchError;
-use ptouch_core::protocol::PrintQuality;
+use ptouch_core::protocol::{PrintQuality, render_feed_scale};
 use ptouch_core::tape;
 use ptouch_core::transport::PtouchDevice;
 
 use ptouch_render::bitmap::LabelBitmap;
-use ptouch_render::document::LabelDocument;
+use ptouch_render::document::{LabelDocument, LabelElement, LayoutMode};
 use ptouch_render::image_loader;
-use ptouch_render::layout::{RenderTarget, RenderedLabel, render_document};
+use ptouch_render::layout::{RenderTarget, render_document};
 use ptouch_render::raster;
-use ptouch_render::text::{TextAlign, TextRenderer};
+use ptouch_render::text::TextAlign;
 
 // ---------------------------------------------------------------------------
 // CLI argument definitions
@@ -535,13 +535,23 @@ fn execute_print(args: &PrintArgs, ignored: &[String]) -> Result<(), Box<dyn std
             (u32::from(width), max, Some(dev))
         };
 
-    // Whole-label mirroring applies once, after the label is composed.
-    let bitmap = build_label(args, print_width)?.mirrored(args.flip_h, args.flip_v);
-    let feed_scale = native_feed_scale(args.quality.to_print_quality(), device.as_ref());
-    let printer_raster = bitmap.scale_to_size(bitmap.width() * feed_scale, bitmap.height());
-    let preview =
-        printer_raster.scale_to_size(printer_raster.width(), printer_raster.height() * feed_scale);
-    emit_label(&printer_raster, &preview, args, max_px, device.as_mut())?;
+    let cross_dpi = device.as_ref().map_or(180, |dev| dev.device_info().dpi);
+    let target = RenderTarget::for_print_quality(
+        print_width,
+        cross_dpi,
+        args.quality.to_print_quality(),
+        device.as_ref().map(PtouchDevice::flags),
+    );
+    let document = build_label_document(args, print_width, cross_dpi)?;
+    let rendered = render_document(&document, target)?;
+    emit_label(
+        &rendered.printer_raster,
+        &rendered.preview,
+        target.feed_dpi,
+        args,
+        max_px,
+        device.as_mut(),
+    )?;
 
     if let Some(dev) = device {
         dev.close()?;
@@ -574,10 +584,11 @@ fn print_layout(args: &PrintArgs, layout_path: &str) -> Result<(), Box<dyn std::
 
     let (print_width, max_px, mut device) = resolve_layout_target(args, &doc)?;
     let target = layout_target(args, &doc, print_width, device.as_ref());
-    let rendered = render_layout(&doc, target)?;
+    let rendered = render_document(&doc, target)?;
     emit_label(
         &rendered.printer_raster,
         &rendered.preview,
+        target.feed_dpi,
         args,
         max_px,
         device.as_mut(),
@@ -629,7 +640,7 @@ fn print_layout_batch(
         let mut row_doc = doc.clone();
         row_doc.apply_values(&values);
         let target = layout_target(args, &row_doc, print_width, device.as_ref());
-        let rendered = render_layout(&row_doc, target)?;
+        let rendered = render_document(&row_doc, target)?;
 
         count += 1;
         if let Some(output) = &args.output {
@@ -669,14 +680,6 @@ fn build_row_values(
     values
 }
 
-/// Render a (placeholder-resolved) layout document to a single bitmap.
-fn render_layout(
-    doc: &LabelDocument,
-    target: RenderTarget,
-) -> Result<RenderedLabel, Box<dyn std::error::Error>> {
-    Ok(render_document(doc, target)?)
-}
-
 fn layout_target(
     args: &PrintArgs,
     doc: &LabelDocument,
@@ -684,26 +687,12 @@ fn layout_target(
     device: Option<&PtouchDevice>,
 ) -> RenderTarget {
     let cross_dpi = device.map_or(doc.dpi, |dev| dev.device_info().dpi);
-    let feed_scale = native_feed_scale(args.quality.to_print_quality(), device);
-    RenderTarget {
-        tape_width_px: print_width,
+    RenderTarget::for_print_quality(
+        print_width,
         cross_dpi,
-        feed_dpi: cross_dpi.saturating_mul(feed_scale as u16),
-    }
-}
-
-fn native_feed_scale(quality: PrintQuality, device: Option<&PtouchDevice>) -> u32 {
-    native_feed_scale_for_flags(quality, device.map(PtouchDevice::flags))
-}
-
-fn native_feed_scale_for_flags(quality: PrintQuality, flags: Option<DeviceFlags>) -> u32 {
-    if quality != PrintQuality::HighRes {
-        return 1;
-    }
-    match flags {
-        Some(flags) => u32::from(flags.contains(DeviceFlags::FEED_HIRES)) + 1,
-        None => 2,
-    }
+        args.quality.to_print_quality(),
+        device.map(PtouchDevice::flags),
+    )
 }
 
 /// Resolve the print width, max pixels, and optional device for a layout.
@@ -760,19 +749,14 @@ fn resolve_layout_target(
 fn emit_label(
     printer_raster: &LabelBitmap,
     preview: &LabelBitmap,
+    feed_dpi: u16,
     args: &PrintArgs,
     max_px: u16,
     device: Option<&mut PtouchDevice>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref output_path) = args.output {
         preview.save(Path::new(output_path))?;
-        let dpi = device.as_ref().map_or(180, |d| d.device_info().dpi);
-        let feed_dpi = f64::from(dpi)
-            * f64::from(native_feed_scale(
-                args.quality.to_print_quality(),
-                device.as_deref(),
-            ));
-        let tape_mm = printer_raster.width() as f64 / feed_dpi * 25.4;
+        let tape_mm = printer_raster.width() as f64 / f64::from(feed_dpi) * 25.4;
         println!(
             "Saved to '{}' ({}x{} px, {:.1} mm of tape)",
             output_path,
@@ -789,38 +773,38 @@ fn emit_label(
     Ok(())
 }
 
-/// Compose a label bitmap from text, image, cut marks, and padding.
-fn build_label(
+/// Convert ad-hoc CLI content flags into a flow document.
+fn build_label_document(
     args: &PrintArgs,
     print_width: u32,
-) -> Result<LabelBitmap, Box<dyn std::error::Error>> {
-    let mut result: Option<LabelBitmap> = None;
+    dpi: u16,
+) -> Result<LabelDocument, Box<dyn std::error::Error>> {
+    let mut elements = Vec::new();
 
     // Render text if provided
     if !args.text.is_empty() {
-        let mut renderer = TextRenderer::new();
-        let lines: Vec<&str> = args.text.iter().map(|s| s.as_str()).collect();
-        let align = args.align.to_text_align();
-
         debug!(
             "Rendering {} text line(s), font={}, size={:?}, margin={}, align={:?}",
-            lines.len(),
+            args.text.len(),
             args.font,
             args.size,
             args.margin,
             args.align
         );
 
-        let text_bitmap = renderer.render_text(
-            &lines,
-            print_width,
-            &args.font,
-            args.size,
-            args.margin,
-            align,
-        )?;
-
-        result = Some(append_bitmap(result, text_bitmap));
+        elements.push(LabelElement::Text {
+            content: args.text.join("\n"),
+            x: None,
+            y: None,
+            font_name: None,
+            font_weight: None,
+            font_size: args.size,
+            font_size_unit: None,
+            align: args.align.to_text_align(),
+            rotation: 0.0,
+            flip_h: false,
+            flip_v: false,
+        });
     }
 
     // Load and append image if provided
@@ -831,57 +815,46 @@ fn build_label(
             target_height: Some(print_width),
             ..image_loader::ImageLoadOptions::default()
         };
-        let img_bitmap = image_loader::load_image(Path::new(img_path), &options)?;
-        result = Some(append_bitmap(result, img_bitmap));
+        let bitmap = image_loader::load_image(Path::new(img_path), &options)?;
+        elements.push(LabelElement::Image {
+            path: Some(Path::new(img_path).to_path_buf()),
+            image_data: Vec::new(),
+            bitmap: Some(bitmap),
+            x: None,
+            y: None,
+            rotation: 0.0,
+            target_height: Some(print_width),
+            target_width: None,
+            flip_h: false,
+            flip_v: false,
+        });
     }
 
     // Add cut mark if requested
     if args.cut {
         debug!("Adding cut mark");
-        let mark = make_cutmark(print_width);
-        result = Some(append_bitmap(result, mark));
+        elements.push(LabelElement::CutMark);
     }
 
     // Add padding if requested
     if let Some(pad_px) = args.pad {
         debug!("Adding {} px padding", pad_px);
-        let pad = make_padding(print_width, pad_px);
-        result = Some(append_bitmap(result, pad));
+        elements.push(LabelElement::Padding { pixels: pad_px });
     }
 
-    result.ok_or_else(|| {
-        Box::new(PtouchError::SendFailed("No content to render".to_string()))
-            as Box<dyn std::error::Error>
+    Ok(LabelDocument {
+        version: 1,
+        tape_width_mm: 0,
+        dpi,
+        layout: LayoutMode::Flow,
+        min_length: 0,
+        end_padding: 0,
+        font_name: args.font.clone(),
+        font_margin: args.margin,
+        flip_h: args.flip_h,
+        flip_v: args.flip_v,
+        elements,
     })
-}
-
-/// Append a new bitmap to an existing one, or return the new bitmap if there
-/// is no existing bitmap yet.
-fn append_bitmap(existing: Option<LabelBitmap>, new: LabelBitmap) -> LabelBitmap {
-    match existing {
-        Some(prev) => prev.append(&new),
-        None => new,
-    }
-}
-
-/// Create a cut mark bitmap: a dashed vertical line.
-///
-/// The mark is 1 pixel wide with alternating black/white dots across the
-/// tape height.
-fn make_cutmark(print_width: u32) -> LabelBitmap {
-    let mut bmp = LabelBitmap::new(1, print_width);
-    for y in 0..print_width {
-        // Alternating 2-pixel dashes
-        if (y / 2) % 2 == 0 {
-            bmp.set_pixel(0, y, true);
-        }
-    }
-    bmp
-}
-
-/// Create a blank padding bitmap of the given width (in the print direction).
-fn make_padding(print_width: u32, pad_px: u32) -> LabelBitmap {
-    LabelBitmap::new(pad_px, print_width)
 }
 
 /// Send the label bitmap to the printer.
@@ -918,9 +891,9 @@ fn print_to_device(
     }
 
     let feed_dpi = f64::from(dev.device_info().dpi)
-        * f64::from(native_feed_scale(
+        * f64::from(render_feed_scale(
             args.quality.to_print_quality(),
-            Some(dev),
+            Some(dev.flags()),
         ));
     let tape_mm = bitmap.width() as f64 / feed_dpi * 25.4;
     println!(
@@ -1032,19 +1005,52 @@ mod tests {
     }
 
     #[test]
-    fn native_feed_scaling_only_expands_supported_high_resolution_output() {
-        assert_eq!(
-            native_feed_scale_for_flags(PrintQuality::HighRes, Some(DeviceFlags::FEED_HIRES)),
-            2
+    fn ad_hoc_high_resolution_text_uses_semantic_renderer() {
+        let cli = Cli::try_parse_from([
+            "ptouch",
+            "print",
+            "Semantic",
+            "--size",
+            "20",
+            "--tape-width",
+            "64",
+            "--output",
+            "unused.png",
+        ])
+        .unwrap();
+        let Commands::Print(args) = cli.command else {
+            panic!("expected print command");
+        };
+        let document = build_label_document(&args, 64, 180).unwrap();
+        let standard = render_document(
+            &document,
+            RenderTarget::for_print_quality(
+                64,
+                180,
+                PrintQuality::Standard,
+                Some(DeviceFlags::FEED_HIRES),
+            ),
+        )
+        .unwrap();
+        let high_resolution = render_document(
+            &document,
+            RenderTarget::for_print_quality(
+                64,
+                180,
+                PrintQuality::HighRes,
+                Some(DeviceFlags::FEED_HIRES),
+            ),
+        )
+        .unwrap();
+        let nearest = standard.printer_raster.scale_to_size(
+            standard.printer_raster.width() * 2,
+            standard.printer_raster.height(),
         );
+
         assert_eq!(
-            native_feed_scale_for_flags(PrintQuality::HighRes, Some(DeviceFlags::LEGACY_HIRES)),
-            1
+            high_resolution.printer_raster.width(),
+            standard.printer_raster.width() * 2
         );
-        assert_eq!(
-            native_feed_scale_for_flags(PrintQuality::Standard, Some(DeviceFlags::FEED_HIRES)),
-            1
-        );
-        assert_eq!(native_feed_scale_for_flags(PrintQuality::HighRes, None), 2);
+        assert_ne!(high_resolution.printer_raster.data(), nearest.data());
     }
 }
