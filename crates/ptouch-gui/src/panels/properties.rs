@@ -7,6 +7,7 @@ use log::{error, info};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
+use ptouch_render::document::{FontSizeUnit, LayoutMode};
 use ptouch_render::image_loader;
 use ptouch_render::text::TextAlign;
 
@@ -32,17 +33,28 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
     match &mut element {
         LabelElement::Text {
             content,
+            x,
+            y,
+            font_name,
+            font_weight,
             font_size,
+            font_size_unit,
             align,
             rotation,
             flip_h,
             flip_v,
+            ..
         } => {
             changed |= show_text_properties(
                 ui,
                 TextProps {
                     content,
+                    x,
+                    y,
+                    font_name,
+                    font_weight,
                     font_size,
+                    font_size_unit,
                     align,
                     rotation,
                     flip_h,
@@ -55,10 +67,14 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
             path,
             image_data,
             bitmap,
+            x,
+            y,
             rotation,
             target_height,
+            target_width,
             flip_h,
             flip_v,
+            ..
         } => {
             changed |= show_image_properties(
                 ui,
@@ -66,8 +82,11 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
                     path,
                     image_data,
                     bitmap,
+                    x,
+                    y,
                     rotation,
                     target_height,
+                    target_width,
                     flip_h,
                     flip_v,
                 },
@@ -88,12 +107,25 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
         state.elements[selected] = element;
         state.mark_dirty();
     }
+
+    if let Some(bounds) = state.element_bounds.get(selected) {
+        ui.separator();
+        ui.label(format!(
+            "Rendered bounds: x={} y={} {}×{} px",
+            bounds.x, bounds.y, bounds.width, bounds.height
+        ));
+    }
 }
 
 /// Mutable references to a text element's editable fields.
 struct TextProps<'a> {
     content: &'a mut String,
+    x: &'a mut Option<u32>,
+    y: &'a mut Option<u32>,
+    font_name: &'a mut Option<String>,
+    font_weight: &'a mut Option<u16>,
     font_size: &'a mut Option<f32>,
+    font_size_unit: &'a mut Option<FontSizeUnit>,
     align: &'a mut TextAlign,
     rotation: &'a mut f32,
     flip_h: &'a mut bool,
@@ -105,8 +137,11 @@ struct ImageProps<'a> {
     path: &'a mut Option<PathBuf>,
     image_data: &'a mut Vec<u8>,
     bitmap: &'a mut Option<ptouch_render::bitmap::LabelBitmap>,
+    x: &'a mut Option<u32>,
+    y: &'a mut Option<u32>,
     rotation: &'a mut f32,
     target_height: &'a mut Option<u32>,
+    target_width: &'a mut Option<u32>,
     flip_h: &'a mut bool,
     flip_v: &'a mut bool,
 }
@@ -128,11 +163,30 @@ fn show_flip_controls(ui: &mut egui::Ui, flip_h: &mut bool, flip_v: &mut bool) -
     changed
 }
 
+fn show_position(ui: &mut egui::Ui, x: &mut Option<u32>, y: &mut Option<u32>) -> bool {
+    let mut changed = x.is_none() || y.is_none();
+    let x = x.get_or_insert(0);
+    let y = y.get_or_insert(0);
+    ui.horizontal(|ui| {
+        ui.label("X:");
+        changed |= ui.add(egui::DragValue::new(x).range(0..=100_000)).changed();
+        ui.label("Y:");
+        changed |= ui.add(egui::DragValue::new(y).range(0..=100_000)).changed();
+        ui.label("px");
+    });
+    changed
+}
+
 /// Show properties for a text element. Returns true if any value changed.
 fn show_text_properties(ui: &mut egui::Ui, props: TextProps, state: &mut AppState) -> bool {
     let TextProps {
         content,
+        x,
+        y,
+        font_name,
+        font_weight,
         font_size,
+        font_size_unit,
         align,
         rotation,
         flip_h,
@@ -150,6 +204,11 @@ fn show_text_properties(ui: &mut egui::Ui, props: TextProps, state: &mut AppStat
         changed = true;
     }
 
+    if state.layout == LayoutMode::Positioned {
+        ui.add_space(4.0);
+        changed |= show_position(ui, x, y);
+    }
+
     ui.add_space(8.0);
 
     // Font name (searchable dropdown)
@@ -160,8 +219,13 @@ fn show_text_properties(ui: &mut egui::Ui, props: TextProps, state: &mut AppStat
             .hint_text("Search fonts..."),
     );
     let query = state.font_search.to_lowercase();
+    let selected_font = if state.layout == LayoutMode::Positioned {
+        font_name.as_deref().unwrap_or(&state.font_name).to_string()
+    } else {
+        state.font_name.clone()
+    };
     egui::ComboBox::from_id_salt("font_selector")
-        .selected_text(&state.font_name)
+        .selected_text(&selected_font)
         .width(150.0)
         .height(300.0)
         .show_ui(ui, |ui| {
@@ -169,22 +233,41 @@ fn show_text_properties(ui: &mut egui::Ui, props: TextProps, state: &mut AppStat
                 if !query.is_empty() && !font.to_lowercase().contains(&query) {
                     continue;
                 }
-                if ui
-                    .selectable_label(state.font_name == *font, font)
-                    .clicked()
-                {
-                    state.font_name = font.clone();
+                if ui.selectable_label(selected_font == *font, font).clicked() {
+                    if state.layout == LayoutMode::Positioned {
+                        *font_name = Some(font.clone());
+                    } else {
+                        state.font_name = font.clone();
+                    }
                     state.font_search.clear();
                     changed = true;
                 }
             }
         });
 
+    if state.layout == LayoutMode::Positioned {
+        if font_weight.is_none() {
+            changed = true;
+        }
+        let weight = font_weight.get_or_insert(400);
+        ui.horizontal(|ui| {
+            ui.label("Weight:");
+            changed |= ui
+                .add(egui::DragValue::new(weight).speed(100).range(1..=1000))
+                .changed();
+        });
+    }
+
     ui.add_space(4.0);
 
     // Font size
+    let positioned = state.layout == LayoutMode::Positioned;
+    if positioned && font_size.is_none() {
+        *font_size = Some(12.0);
+        changed = true;
+    }
     let mut use_auto = font_size.is_none();
-    if ui.checkbox(&mut use_auto, "Auto font size").changed() {
+    if !positioned && ui.checkbox(&mut use_auto, "Auto font size").changed() {
         if use_auto {
             *font_size = None;
         } else {
@@ -202,56 +285,89 @@ fn show_text_properties(ui: &mut egui::Ui, props: TextProps, state: &mut AppStat
             {
                 changed = true;
             }
+            if positioned {
+                if font_size_unit.is_none() {
+                    changed = true;
+                }
+                let unit = font_size_unit.get_or_insert(FontSizeUnit::Points);
+                egui::ComboBox::from_id_salt("font_size_unit")
+                    .selected_text(match unit {
+                        FontSizeUnit::Points => "pt",
+                        FontSizeUnit::Pixels => "px",
+                    })
+                    .show_ui(ui, |ui| {
+                        changed |= ui
+                            .selectable_value(unit, FontSizeUnit::Points, "pt")
+                            .changed();
+                        changed |= ui
+                            .selectable_value(unit, FontSizeUnit::Pixels, "px")
+                            .changed();
+                    });
+            }
         });
     }
 
     ui.add_space(4.0);
 
-    // Font margin
-    ui.horizontal(|ui| {
-        ui.label("Margin:");
-        if ui
-            .add(
-                egui::DragValue::new(&mut state.font_margin)
-                    .speed(1.0)
-                    .range(0..=50),
-            )
-            .changed()
-        {
-            changed = true;
-        }
-        ui.label("px");
-    });
+    if !positioned {
+        ui.horizontal(|ui| {
+            ui.label("Margin:");
+            if ui
+                .add(
+                    egui::DragValue::new(&mut state.font_margin)
+                        .speed(1.0)
+                        .range(0..=50),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            ui.label("px");
+        });
+    }
 
     ui.add_space(4.0);
 
-    // Alignment
-    ui.label("Alignment:");
-    ui.horizontal(|ui| {
-        if ui
-            .selectable_label(matches!(align, TextAlign::Left), "Left")
-            .clicked()
-        {
-            *align = TextAlign::Left;
-            changed = true;
-        }
-        if ui
-            .selectable_label(matches!(align, TextAlign::Center), "Center")
-            .clicked()
-        {
-            *align = TextAlign::Center;
-            changed = true;
-        }
-        if ui
-            .selectable_label(matches!(align, TextAlign::Right), "Right")
-            .clicked()
-        {
-            *align = TextAlign::Right;
-            changed = true;
-        }
-    });
+    if !positioned {
+        // Alignment controls the horizontal placement within a flow segment.
+        ui.label("Alignment:");
+        ui.horizontal(|ui| {
+            if ui
+                .selectable_label(matches!(align, TextAlign::Left), "Left")
+                .clicked()
+            {
+                *align = TextAlign::Left;
+                changed = true;
+            }
+            if ui
+                .selectable_label(matches!(align, TextAlign::Center), "Center")
+                .clicked()
+            {
+                *align = TextAlign::Center;
+                changed = true;
+            }
+            if ui
+                .selectable_label(matches!(align, TextAlign::Right), "Right")
+                .clicked()
+            {
+                *align = TextAlign::Right;
+                changed = true;
+            }
+        });
+        ui.add_space(4.0);
+    }
 
-    ui.add_space(4.0);
+    // Positioned text intentionally stays axis-aligned so glyph coverage can
+    // remain grayscale through the anisotropic target transform.
+    if positioned {
+        if rotation.abs() >= f32::EPSILON {
+            changed = true;
+        }
+        *rotation = 0.0;
+        ui.add_space(4.0);
+        changed |= show_flip_controls(ui, flip_h, flip_v);
+        return changed;
+    }
 
     // Rotation
     ui.label("Rotation:");
@@ -343,8 +459,11 @@ fn show_image_properties(ui: &mut egui::Ui, props: ImageProps, state: &mut AppSt
         path,
         image_data,
         bitmap,
+        x,
+        y,
         rotation,
         target_height,
+        target_width,
         flip_h,
         flip_v,
     } = props;
@@ -352,6 +471,11 @@ fn show_image_properties(ui: &mut egui::Ui, props: ImageProps, state: &mut AppSt
 
     ui.label("Image");
     ui.add_space(4.0);
+
+    if state.layout == LayoutMode::Positioned {
+        changed |= show_position(ui, x, y);
+        ui.add_space(4.0);
+    }
 
     let file_label = path
         .as_ref()
@@ -409,7 +533,41 @@ fn show_image_properties(ui: &mut egui::Ui, props: ImageProps, state: &mut AppSt
         });
     }
 
+    if state.layout == LayoutMode::Positioned {
+        if target_width.is_none() {
+            changed = true;
+        }
+        let width = target_width.get_or_insert_with(|| {
+            bitmap
+                .as_ref()
+                .filter(|bitmap| bitmap.height() > 0)
+                .map(|bitmap| {
+                    let height = target_height.unwrap_or(state.tape_width_px);
+                    ((u64::from(bitmap.width()) * u64::from(height)) / u64::from(bitmap.height()))
+                        .max(1) as u32
+                })
+                .unwrap_or(1)
+        });
+        ui.horizontal(|ui| {
+            ui.label("Width:");
+            changed |= ui
+                .add(egui::DragValue::new(width).speed(1).range(1..=100_000))
+                .changed();
+            ui.label("px");
+        });
+    }
+
     ui.add_space(4.0);
+
+    if state.layout == LayoutMode::Positioned {
+        if rotation.abs() >= f32::EPSILON {
+            changed = true;
+        }
+        *rotation = 0.0;
+        ui.add_space(4.0);
+        changed |= show_flip_controls(ui, flip_h, flip_v);
+        return changed;
+    }
 
     // Rotation
     ui.label("Rotation:");

@@ -23,7 +23,40 @@ use crate::image_loader::{self, ImageLoadOptions};
 use crate::text::{TextAlign, TextRenderer};
 
 /// Current on-disk layout format version.
-pub const DOCUMENT_VERSION: u32 = 1;
+pub const DOCUMENT_VERSION: u32 = 2;
+
+/// How elements are arranged on the label.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutMode {
+    /// Compose elements from left to right using the version 1 behavior.
+    #[default]
+    Flow,
+    /// Place elements at explicit coordinates on a shared canvas.
+    Positioned,
+}
+
+impl LayoutMode {
+    fn is_flow(&self) -> bool {
+        *self == Self::Flow
+    }
+}
+
+/// Unit used by an explicitly sized text element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FontSizeUnit {
+    /// Typographic points (1/72 inch).
+    #[serde(rename = "pt")]
+    Points,
+    /// Logical layout pixels.
+    #[serde(rename = "px")]
+    Pixels,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
 
 /// Default design resolution for layouts saved before the dpi field existed.
 fn default_dpi() -> u16 {
@@ -42,6 +75,15 @@ pub struct LabelDocument {
     /// this field default to 180 dpi.
     #[serde(default = "default_dpi")]
     pub dpi: u16,
+    /// Element arrangement. Omitted version 1 layouts use flow composition.
+    #[serde(default, skip_serializing_if = "LayoutMode::is_flow")]
+    pub layout: LayoutMode,
+    /// Minimum positioned-label length in logical layout pixels.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub min_length: u32,
+    /// Blank space after the rightmost positioned element, in logical pixels.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub end_padding: u32,
     /// Font family name used for text elements.
     pub font_name: String,
     /// Font top/bottom margin in pixels.
@@ -75,6 +117,11 @@ impl LabelDocument {
                 "unsupported layout version {} (this build supports up to {})",
                 doc.version, DOCUMENT_VERSION
             )));
+        }
+        if doc.layout == LayoutMode::Positioned && doc.version < 2 {
+            return Err(RenderError::Layout(
+                "positioned layout requires layout version 2".to_string(),
+            ));
         }
         doc.decode_image_caches()?;
         Ok(doc)
@@ -187,12 +234,29 @@ pub enum LabelElement {
     Text {
         /// Text content; newlines separate lines.
         content: String,
-        /// Explicit font size in points. `None` means auto-fit to tape height.
+        /// Horizontal coordinate in logical layout pixels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<u32>,
+        /// Vertical coordinate in logical layout pixels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<u32>,
+        /// Font family override. `None` inherits the document font.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font_name: Option<String>,
+        /// CSS-style font weight from 1 through 1000. `None` means regular.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font_weight: Option<u16>,
+        /// Explicit font size. `None` means auto-fit to tape height in flow layouts.
         #[serde(skip_serializing_if = "Option::is_none")]
         font_size: Option<f32>,
+        /// Unit for `font_size`. Positioned text defaults to points when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font_size_unit: Option<FontSizeUnit>,
         /// Horizontal alignment of the text block.
+        #[serde(default)]
         align: TextAlign,
         /// Rotation angle in degrees (clockwise). 0.0 = horizontal.
+        #[serde(default)]
         rotation: f32,
         /// Mirror this element left-right (horizontal). Applied to the element's
         /// own bitmap, before it is composed into the label.
@@ -214,11 +278,21 @@ pub enum LabelElement {
         /// Decoded render cache; rebuilt from `image_data`, never serialized.
         #[serde(skip)]
         bitmap: Option<LabelBitmap>,
+        /// Horizontal coordinate in logical layout pixels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<u32>,
+        /// Vertical coordinate in logical layout pixels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<u32>,
         /// Rotation angle in degrees (clockwise). 0.0 = horizontal.
+        #[serde(default)]
         rotation: f32,
         /// Target height in pixels. `None` = auto (fit to tape height).
         #[serde(skip_serializing_if = "Option::is_none")]
         target_height: Option<u32>,
+        /// Target width in logical layout pixels. `None` preserves aspect ratio.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_width: Option<u32>,
         /// Mirror this element left-right (horizontal). Applied to the element's
         /// own bitmap, before it is composed into the label.
         #[serde(default)]
@@ -250,8 +324,11 @@ impl LabelElement {
             path,
             image_data,
             bitmap,
+            x: None,
+            y: None,
             rotation: 0.0,
             target_height: None,
+            target_width: None,
             flip_h: false,
             flip_v: false,
         }
@@ -321,6 +398,7 @@ pub fn render_elements(
                 rotation,
                 flip_h,
                 flip_v,
+                ..
             } => match render_text_segment(
                 renderer,
                 content,
@@ -568,8 +646,11 @@ mod tests {
                 path,
                 image_data,
                 bitmap,
+                x: None,
+                y: None,
                 rotation,
                 target_height,
+                target_width: None,
                 flip_h,
                 flip_v,
             },
@@ -691,7 +772,12 @@ mod tests {
         let mut renderer = TextRenderer::new();
         let elements = vec![LabelElement::Text {
             content: String::new(),
+            x: None,
+            y: None,
+            font_name: None,
+            font_weight: None,
             font_size: Some(24.0),
+            font_size_unit: None,
             align: TextAlign::Left,
             rotation: 0.0,
             flip_h: false,
@@ -726,8 +812,11 @@ mod tests {
                 path,
                 image_data,
                 bitmap,
+                x: None,
+                y: None,
                 rotation: 90.0,
                 target_height,
+                target_width: None,
                 flip_h: false,
                 flip_v: false,
             },
@@ -742,9 +831,12 @@ mod tests {
     /// Build a small document containing one of each element kind.
     fn sample_document() -> LabelDocument {
         LabelDocument {
-            version: DOCUMENT_VERSION,
+            version: 1,
             tape_width_mm: 12,
             dpi: 180,
+            layout: LayoutMode::Flow,
+            min_length: 0,
+            end_padding: 0,
             font_name: "DejaVuSans".into(),
             font_margin: 2,
             flip_h: false,
@@ -752,7 +844,12 @@ mod tests {
             elements: vec![
                 LabelElement::Text {
                     content: "Hi".into(),
+                    x: None,
+                    y: None,
+                    font_name: None,
+                    font_weight: None,
                     font_size: Some(24.0),
+                    font_size_unit: None,
                     align: TextAlign::Center,
                     rotation: 0.0,
                     flip_h: false,
@@ -806,6 +903,9 @@ mod tests {
             version: DOCUMENT_VERSION + 1,
             tape_width_mm: 12,
             dpi: 180,
+            layout: LayoutMode::Flow,
+            min_length: 0,
+            end_padding: 0,
             font_name: "x".into(),
             font_margin: 0,
             flip_h: false,
@@ -817,11 +917,100 @@ mod tests {
     }
 
     #[test]
+    fn positioned_v2_document_parses_layout_and_element_geometry() {
+        let text = r#"
+version = 2
+tape_width_mm = 24
+dpi = 180
+layout = "positioned"
+min_length = 230
+end_padding = 3
+font_name = "Inter"
+font_margin = 0
+
+[[elements]]
+type = "text"
+content = "{{brand}}"
+x = 141
+y = 3
+font_name = "Inter"
+font_weight = 700
+font_size = 8
+font_size_unit = "pt"
+
+[[elements]]
+type = "image"
+x = 0
+y = 0
+target_width = 128
+target_height = 128
+image_data = ""
+"#;
+
+        let doc = LabelDocument::from_toml_str(text).unwrap();
+        assert_eq!(doc.version, 2);
+        assert_eq!(doc.layout, LayoutMode::Positioned);
+        assert_eq!((doc.min_length, doc.end_padding), (230, 3));
+        match &doc.elements[0] {
+            LabelElement::Text {
+                x,
+                y,
+                font_name,
+                font_weight,
+                font_size,
+                font_size_unit,
+                ..
+            } => {
+                assert_eq!((*x, *y), (Some(141), Some(3)));
+                assert_eq!(font_name.as_deref(), Some("Inter"));
+                assert_eq!(*font_weight, Some(700));
+                assert_eq!(*font_size, Some(8.0));
+                assert_eq!(*font_size_unit, Some(FontSizeUnit::Points));
+            }
+            _ => panic!("expected text element"),
+        }
+        match &doc.elements[1] {
+            LabelElement::Image {
+                x,
+                y,
+                target_width,
+                target_height,
+                ..
+            } => {
+                assert_eq!((*x, *y), (Some(0), Some(0)));
+                assert_eq!((*target_width, *target_height), (Some(128), Some(128)));
+            }
+            _ => panic!("expected image element"),
+        }
+    }
+
+    #[test]
+    fn positioned_layout_requires_version_two() {
+        let text = r#"
+version = 1
+tape_width_mm = 24
+dpi = 180
+layout = "positioned"
+min_length = 230
+end_padding = 3
+font_name = "Inter"
+font_margin = 0
+elements = []
+"#;
+
+        let error = LabelDocument::from_toml_str(text).unwrap_err();
+        assert!(error.to_string().contains("requires layout version 2"));
+    }
+
+    #[test]
     fn test_corrupt_image_data_is_rejected() {
         let doc = LabelDocument {
             version: DOCUMENT_VERSION,
             tape_width_mm: 12,
             dpi: 180,
+            layout: LayoutMode::Flow,
+            min_length: 0,
+            end_padding: 0,
             font_name: "x".into(),
             font_margin: 0,
             flip_h: false,
@@ -830,8 +1019,11 @@ mod tests {
                 path: None,
                 image_data: b"not a real image".to_vec(),
                 bitmap: None,
+                x: None,
+                y: None,
                 rotation: 0.0,
                 target_height: None,
+                target_width: None,
                 flip_h: false,
                 flip_v: false,
             }],
@@ -853,13 +1045,21 @@ mod tests {
             version: DOCUMENT_VERSION,
             tape_width_mm: 12,
             dpi: 180,
+            layout: LayoutMode::Flow,
+            min_length: 0,
+            end_padding: 0,
             font_name: "x".into(),
             font_margin: 0,
             flip_h: false,
             flip_v: false,
             elements: vec![LabelElement::Text {
                 content: content.into(),
+                x: None,
+                y: None,
+                font_name: None,
+                font_weight: None,
                 font_size: Some(24.0),
+                font_size_unit: None,
                 align: TextAlign::Left,
                 rotation: 0.0,
                 flip_h: false,

@@ -297,18 +297,27 @@ pub fn build_print_job(lines: &[Vec<u8>], flags: DeviceFlags, opts: &JobOptions)
     let use_packbits = flags.contains(DeviceFlags::RASTER_PACKBITS);
     let is_d460bt = flags.contains(DeviceFlags::D460BT_MAGIC);
 
-    // Quality modes change the feed resolution along the tape. Keep the
-    // physical length by duplicating lines (high resolution) or dropping
-    // every other line (draft).
-    let quality = if flags.contains(DeviceFlags::LEGACY_HIRES) {
-        opts.quality
-    } else {
-        PrintQuality::Standard
+    // Quality modes change the feed resolution along the tape. Legacy devices
+    // keep physical length by duplicating lines (high resolution) or dropping
+    // every other line (draft). Native feed-resolution devices receive the
+    // caller-rendered high-resolution lines unchanged.
+    let quality = match opts.quality {
+        PrintQuality::HighRes
+            if flags.intersects(DeviceFlags::LEGACY_HIRES | DeviceFlags::FEED_HIRES) =>
+        {
+            PrintQuality::HighRes
+        }
+        PrintQuality::Draft if flags.contains(DeviceFlags::LEGACY_HIRES) => PrintQuality::Draft,
+        _ => PrintQuality::Standard,
     };
-    let (repeat, step) = match quality {
-        PrintQuality::Standard => (1, 1),
-        PrintQuality::HighRes => (2, 1),
-        PrintQuality::Draft => (1, 2),
+    let (repeat, step) = if flags.contains(DeviceFlags::LEGACY_HIRES) {
+        match quality {
+            PrintQuality::Standard => (1, 1),
+            PrintQuality::HighRes => (2, 1),
+            PrintQuality::Draft => (1, 2),
+        }
+    } else {
+        (1, 1)
     };
     let selected: Vec<&Vec<u8>> = lines.iter().step_by(step).collect();
     let line_count = (selected.len() * repeat) as u32;
@@ -320,8 +329,10 @@ pub fn build_print_job(lines: &[Vec<u8>], flags: DeviceFlags, opts: &JobOptions)
     // The standard quality path stays byte identical to the verified
     // stream; quality commands are only sent when a non-default mode is
     // requested on a device that supports it.
-    if flags.contains(DeviceFlags::LEGACY_HIRES) && quality != PrintQuality::Standard {
-        job.push(cmd_legacy_info(opts.media_width, quality));
+    if quality != PrintQuality::Standard {
+        if flags.contains(DeviceFlags::LEGACY_HIRES) {
+            job.push(cmd_legacy_info(opts.media_width, quality));
+        }
         job.push(cmd_advanced_mode(quality, false, true, true));
     }
 
@@ -668,6 +679,26 @@ mod tests {
         ]
         .concat();
         assert_eq!(flat(&job), expected);
+    }
+
+    #[test]
+    fn test_job_native_feed_hires_keeps_caller_rendered_lines() {
+        let lines = vec![vec![0xAA], vec![0x55]];
+        let options = JobOptions {
+            media_width: 24,
+            quality: PrintQuality::HighRes,
+            ..JobOptions::default()
+        };
+        let flags = DeviceFlags::RASTER_PACKBITS.union(DeviceFlags::FEED_HIRES);
+        let bytes = flat(&build_print_job(&lines, flags, &options));
+
+        assert!(!bytes.windows(3).any(|window| window == [0x1B, 0x69, 0x63]));
+        assert!(
+            bytes
+                .windows(4)
+                .any(|window| window == [0x1B, 0x69, 0x4B, 0x4c])
+        );
+        assert_eq!(bytes.iter().filter(|&&byte| byte == 0x47).count(), 2);
     }
 
     #[test]

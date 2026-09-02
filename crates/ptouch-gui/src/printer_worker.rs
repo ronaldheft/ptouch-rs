@@ -73,7 +73,10 @@ fn do_poll(resp_tx: &mpsc::Sender<PrinterResponse>, ctx: &egui::Context) {
         Ok(mut dev) => {
             let max_px = dev.max_px();
             let dpi = dev.device_info().dpi;
-            let quality_modes = dev.flags().contains(DeviceFlags::LEGACY_HIRES);
+            let quality_modes = dev
+                .flags()
+                .intersects(DeviceFlags::LEGACY_HIRES | DeviceFlags::FEED_HIRES);
+            let native_feed_hires = dev.flags().contains(DeviceFlags::FEED_HIRES);
             let model_name = dev.device_info().name.to_string();
             match dev.query_status() {
                 Ok(status) => {
@@ -87,6 +90,7 @@ fn do_poll(resp_tx: &mpsc::Sender<PrinterResponse>, ctx: &egui::Context) {
                         max_px,
                         dpi,
                         quality_modes,
+                        native_feed_hires,
                     }
                 }
                 Err(e) => {

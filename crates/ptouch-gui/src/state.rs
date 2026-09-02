@@ -7,6 +7,8 @@ use std::sync::mpsc;
 
 use ptouch_core::protocol::PrintQuality;
 use ptouch_render::bitmap::LabelBitmap;
+use ptouch_render::document::{LabelDocument, LayoutMode};
+use ptouch_render::layout::ElementBounds;
 
 pub use ptouch_render::document::LabelElement;
 
@@ -35,6 +37,7 @@ pub enum PrinterResponse {
         max_px: u16,
         dpi: u16,
         quality_modes: bool,
+        native_feed_hires: bool,
     },
     /// No printer found or previously connected printer lost.
     Disconnected,
@@ -56,6 +59,14 @@ pub struct AppState {
     pub tape_width_mm: u8,
     /// Current tape width in pixels (derived from tape_width_mm).
     pub tape_width_px: u32,
+    /// Resolution used by logical positions and dimensions in the document.
+    pub document_dpi: u16,
+    /// Current document layout mode.
+    pub layout: LayoutMode,
+    /// Minimum label length for positioned layouts.
+    pub min_length: u32,
+    /// Blank space after the rightmost positioned element.
+    pub end_padding: u32,
     /// Font name used for text rendering.
     pub font_name: String,
     /// Font top/bottom margin in pixels.
@@ -68,6 +79,10 @@ pub struct AppState {
     pub available_fonts: Vec<String>,
     /// The rendered preview bitmap (1-bit).
     pub preview_bitmap: Option<LabelBitmap>,
+    /// Exact raster to send to the printer.
+    pub printer_bitmap: Option<LabelBitmap>,
+    /// Final logical bounds returned by the renderer.
+    pub element_bounds: Vec<ElementBounds>,
     /// The preview texture uploaded to the GPU.
     pub preview_texture: Option<egui::TextureHandle>,
     /// Flag indicating the preview needs to be re-rendered.
@@ -100,6 +115,8 @@ pub struct AppState {
     pub printer_dpi: u16,
     /// Whether the last connected printer supports print quality modes.
     pub printer_quality_modes: bool,
+    /// Whether high quality accepts caller-rendered 2x feed samples.
+    pub printer_native_feed_hires: bool,
     /// Selected print quality for the next print job.
     pub print_quality: PrintQuality,
     /// Channel sender for commands to the printer worker thread.
@@ -113,12 +130,18 @@ impl Default for AppState {
             selected_element: None,
             tape_width_mm: 12,
             tape_width_px: 76,
+            document_dpi: 180,
+            layout: LayoutMode::Flow,
+            min_length: 0,
+            end_padding: 0,
             font_name: "DejaVuSans".to_string(),
             font_margin: 0,
             overall_flip_h: false,
             overall_flip_v: false,
             available_fonts: Vec::new(),
             preview_bitmap: None,
+            printer_bitmap: None,
+            element_bounds: Vec::new(),
             preview_texture: None,
             needs_rerender: true,
             zoom: 1.0,
@@ -134,6 +157,7 @@ impl Default for AppState {
             printer_max_px: 0,
             printer_dpi: 180,
             printer_quality_modes: false,
+            printer_native_feed_hires: false,
             print_quality: PrintQuality::Standard,
             printer_cmd_tx: None,
         }
@@ -141,6 +165,42 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Convert the editor state into its serialized document model.
+    pub fn to_document(&self) -> LabelDocument {
+        LabelDocument {
+            version: if self.layout == LayoutMode::Positioned {
+                2
+            } else {
+                1
+            },
+            tape_width_mm: self.tape_width_mm,
+            dpi: self.document_dpi,
+            layout: self.layout,
+            min_length: self.min_length,
+            end_padding: self.end_padding,
+            font_name: self.font_name.clone(),
+            font_margin: self.font_margin,
+            flip_h: self.overall_flip_h,
+            flip_v: self.overall_flip_v,
+            elements: self.elements.clone(),
+        }
+    }
+
+    /// Replace editor fields with a loaded document.
+    pub fn apply_document(&mut self, document: LabelDocument) {
+        self.tape_width_mm = document.tape_width_mm;
+        self.document_dpi = document.dpi;
+        self.layout = document.layout;
+        self.min_length = document.min_length;
+        self.end_padding = document.end_padding;
+        self.font_name = document.font_name;
+        self.font_margin = document.font_margin;
+        self.overall_flip_h = document.flip_h;
+        self.overall_flip_v = document.flip_v;
+        self.elements = document.elements;
+        self.selected_element = None;
+    }
+
     /// Update the tape width in pixels based on the current tape_width_mm
     /// and the connected printer's resolution.
     pub fn update_tape_pixels(&mut self) {
@@ -169,6 +229,75 @@ impl AppState {
             } else {
                 Some(self.elements.len() - 1)
             };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ptouch_render::document::{FontSizeUnit, LayoutMode};
+    use ptouch_render::text::TextAlign;
+
+    use super::*;
+
+    #[test]
+    fn positioned_document_round_trip_preserves_editor_fields() {
+        let mut state = AppState {
+            layout: LayoutMode::Positioned,
+            min_length: 230,
+            end_padding: 3,
+            ..AppState::default()
+        };
+        for (index, weight) in [700, 300, 500, 800].into_iter().enumerate() {
+            state.elements.push(LabelElement::Text {
+                content: format!("{{{{field_{index}}}}}"),
+                x: Some(141),
+                y: Some([3, 28, 52, 85][index]),
+                font_name: Some("Inter".to_string()),
+                font_weight: Some(weight),
+                font_size: Some(if index == 3 { 14.0 } else { 8.0 }),
+                font_size_unit: Some(FontSizeUnit::Points),
+                align: TextAlign::Left,
+                rotation: 0.0,
+                flip_h: false,
+                flip_v: false,
+            });
+        }
+
+        let serialized = state.to_document().to_toml_string().unwrap();
+        let document = LabelDocument::from_toml_str(&serialized).unwrap();
+        assert_eq!(document.version, 2);
+        assert_eq!(document.layout, LayoutMode::Positioned);
+        let weights: Vec<Option<u16>> = document
+            .elements
+            .iter()
+            .map(|element| match element {
+                LabelElement::Text { font_weight, .. } => *font_weight,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(weights, vec![Some(700), Some(300), Some(500), Some(800)]);
+
+        let mut restored = AppState::default();
+        restored.apply_document(document);
+        assert_eq!(restored.layout, LayoutMode::Positioned);
+        assert_eq!(restored.min_length, 230);
+        assert_eq!(restored.end_padding, 3);
+        match &restored.elements[0] {
+            LabelElement::Text {
+                x,
+                y,
+                font_name,
+                font_weight,
+                font_size_unit,
+                ..
+            } => {
+                assert_eq!((*x, *y), (Some(141), Some(3)));
+                assert_eq!(font_name.as_deref(), Some("Inter"));
+                assert_eq!(*font_weight, Some(700));
+                assert_eq!(*font_size_unit, Some(FontSizeUnit::Points));
+            }
+            _ => panic!("expected text element"),
         }
     }
 }

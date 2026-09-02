@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use log::{error, info};
 
 use ptouch_render::document::LabelDocument;
+use ptouch_render::document::{FontSizeUnit, LayoutMode};
 use ptouch_render::raster;
 use ptouch_render::text::TextAlign;
 
@@ -18,9 +19,15 @@ pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
         // -- Element addition buttons --
         if ui.button("Add Text").clicked() {
+            let positioned = state.layout == LayoutMode::Positioned;
             state.elements.push(LabelElement::Text {
                 content: "Label".to_string(),
-                font_size: None,
+                x: positioned.then_some(0),
+                y: positioned.then_some(0),
+                font_name: None,
+                font_weight: positioned.then_some(400),
+                font_size: positioned.then_some(12.0),
+                font_size_unit: positioned.then_some(FontSizeUnit::Points),
                 align: TextAlign::Left,
                 rotation: 0.0,
                 flip_h: false,
@@ -38,7 +45,19 @@ pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             // label and stays self-contained when saved to a layout file.
             match std::fs::read(&path) {
                 Ok(bytes) => {
-                    let element = LabelElement::image_from_bytes(Some(path.clone()), bytes);
+                    let mut element = LabelElement::image_from_bytes(Some(path.clone()), bytes);
+                    if state.layout == LayoutMode::Positioned
+                        && let LabelElement::Image {
+                            x,
+                            y,
+                            target_height,
+                            ..
+                        } = &mut element
+                    {
+                        *x = Some(0);
+                        *y = Some(0);
+                        *target_height = Some(state.tape_width_px);
+                    }
                     // Reject files that do not decode, so a saved layout can
                     // always be reopened.
                     if matches!(element, LabelElement::Image { bitmap: None, .. }) {
@@ -58,14 +77,26 @@ pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
 
-        if ui.button("Cut Mark").clicked() {
+        if ui
+            .add_enabled(
+                state.layout == LayoutMode::Flow,
+                egui::Button::new("Cut Mark"),
+            )
+            .clicked()
+        {
             state.elements.push(LabelElement::CutMark);
             state.selected_element = Some(state.elements.len() - 1);
             state.mark_dirty();
             info!("Added cut mark");
         }
 
-        if ui.button("Padding").clicked() {
+        if ui
+            .add_enabled(
+                state.layout == LayoutMode::Flow,
+                egui::Button::new("Padding"),
+            )
+            .clicked()
+        {
             state.elements.push(LabelElement::Padding { pixels: 20 });
             state.selected_element = Some(state.elements.len() - 1);
             state.mark_dirty();
@@ -82,7 +113,7 @@ pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
         if ui
             .add_enabled(connected && !busy && has_bitmap, egui::Button::new("Print"))
             .clicked()
-            && let Some(ref bitmap) = state.preview_bitmap
+            && let Some(ref bitmap) = state.printer_bitmap
         {
             let raster_lines = raster::bitmap_to_raster_lines(bitmap, state.printer_max_px);
             let chain_print = !state.auto_cut;
@@ -132,16 +163,7 @@ fn do_save_layout(state: &mut AppState) {
         return;
     }
 
-    let document = LabelDocument {
-        version: ptouch_render::document::DOCUMENT_VERSION,
-        tape_width_mm: state.tape_width_mm,
-        dpi: state.printer_dpi,
-        font_name: state.font_name.clone(),
-        font_margin: state.font_margin,
-        flip_h: state.overall_flip_h,
-        flip_v: state.overall_flip_v,
-        elements: state.elements.clone(),
-    };
+    let document = state.to_document();
 
     let text = match document.to_toml_string() {
         Ok(text) => text,
@@ -191,14 +213,8 @@ fn do_open_layout(state: &mut AppState) {
 
     match LabelDocument::from_toml_str(&text) {
         Ok(document) => {
-            state.tape_width_mm = document.tape_width_mm;
+            state.apply_document(document);
             state.update_tape_pixels();
-            state.font_name = document.font_name;
-            state.font_margin = document.font_margin;
-            state.overall_flip_h = document.flip_h;
-            state.overall_flip_v = document.flip_v;
-            state.elements = document.elements;
-            state.selected_element = None;
             state.mark_dirty();
             state.status_message = format!("Opened {}", path.display());
             info!("Opened layout: {}", path.display());
