@@ -23,3 +23,4 @@ serde = { version = "1.0", features = ["derive"] }
 toml = "1.1"
 base64 = "0.23"
 qrcode = { version = "0.14.1", default-features = false }
+qrcodegen = "1.8.0"

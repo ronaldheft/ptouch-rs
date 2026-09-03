@@ -378,6 +378,9 @@ pub enum LabelElement {
         /// QR error-correction level.
         #[serde(default)]
         error_correction: QrErrorCorrection,
+        /// Optional source symbol data for byte-for-byte QR reproduction.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<QrSource>,
         /// Smallest allowed square module size in logical pixels.
         #[serde(default = "default_qr_min_module_size", skip_serializing_if = "is_one")]
         min_module_size: u32,
@@ -389,6 +392,17 @@ pub enum LabelElement {
         /// Padding width in pixels.
         pixels: u32,
     },
+}
+
+/// Source QR metadata captured by a barcode decoder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QrSource {
+    /// Base64-encoded data codewords, excluding Reed-Solomon correction bytes.
+    pub data_codewords_base64: String,
+    /// QR Model 2 version from 1 through 40.
+    pub version: u8,
+    /// QR mask pattern from 0 through 7.
+    pub mask_pattern: u8,
 }
 
 impl LabelElement {
@@ -519,10 +533,17 @@ pub fn render_elements(
                 content,
                 size,
                 error_correction,
+                source,
                 min_module_size,
                 ..
-            } => crate::qr::render_qr(content, *error_correction, *size, *min_module_size)?
-                .fit_height(tape_width_px),
+            } => crate::qr::render_qr(
+                content,
+                *error_correction,
+                *size,
+                *min_module_size,
+                source.as_ref(),
+            )?
+            .fit_height(tape_width_px),
             LabelElement::CutMark => compose::cutmark(tape_width_px),
             LabelElement::Padding { pixels } => compose::padding(tape_width_px, *pixels),
         };
@@ -1255,12 +1276,14 @@ min_module_size = 2
                 y,
                 size,
                 error_correction,
+                source,
                 min_module_size,
             } => {
                 assert_eq!(content, "https://example.com/returns/ABC-123");
                 assert_eq!((*x, *y), (None, None));
                 assert_eq!(*size, 120);
                 assert_eq!(*error_correction, QrErrorCorrection::Quartile);
+                assert_eq!(*source, None);
                 assert_eq!(*min_module_size, 2);
             }
             _ => panic!("expected QR code element"),
@@ -1283,5 +1306,36 @@ size = 120
 
         let error = LabelDocument::from_toml_str(text).unwrap_err();
         assert!(error.to_string().contains("require layout version 2"));
+    }
+
+    #[test]
+    fn semantic_qr_parses_source_symbol_metadata() {
+        let text = r#"
+version = 2
+tape_width_mm = 24
+font_name = "sans-serif"
+font_margin = 0
+
+[[elements]]
+type = "qr"
+content = "HELLO"
+size = 58
+error_correction = "l"
+source = { data_codewords_base64 = "QFSEVMTE8OwR7BHsEewR7BHsEQ==", version = 1, mask_pattern = 7 }
+min_module_size = 2
+"#;
+
+        let document = LabelDocument::from_toml_str(text).unwrap();
+        match &document.elements[0] {
+            LabelElement::QrCode {
+                source: Some(source),
+                ..
+            } => {
+                assert_eq!(source.version, 1);
+                assert_eq!(source.mask_pattern, 7);
+                assert_eq!(source.data_codewords_base64, "QFSEVMTE8OwR7BHsEewR7BHsEQ==");
+            }
+            _ => panic!("expected source-preserving QR code element"),
+        }
     }
 }

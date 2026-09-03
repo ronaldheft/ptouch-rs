@@ -99,6 +99,7 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
             y,
             size,
             error_correction,
+            source,
             min_module_size,
         } => {
             changed |= show_qr_properties(
@@ -109,6 +110,7 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
                     y,
                     size,
                     error_correction,
+                    source,
                     min_module_size,
                 },
                 state,
@@ -146,6 +148,7 @@ fn show_qr_properties(ui: &mut egui::Ui, props: QrProps, state: &AppState) -> bo
         y,
         size,
         error_correction,
+        source,
         min_module_size,
     } = props;
     let mut changed = false;
@@ -199,6 +202,14 @@ fn show_qr_properties(ui: &mut egui::Ui, props: QrProps, state: &AppState) -> bo
                 .selectable_value(error_correction, QrErrorCorrection::High, "H")
                 .changed();
         });
+    if source.is_some() {
+        ui.add_space(4.0);
+        ui.label("This QR preserves a decoded source symbol's codewords, version, and mask.");
+        if ui.button("Use content encoding instead").clicked() {
+            *source = None;
+            changed = true;
+        }
+    }
     changed
 }
 
@@ -209,6 +220,7 @@ struct QrProps<'a> {
     y: &'a mut Option<u32>,
     size: &'a mut u32,
     error_correction: &'a mut QrErrorCorrection,
+    source: &'a mut Option<ptouch_render::document::QrSource>,
     min_module_size: &'a mut u32,
 }
 
