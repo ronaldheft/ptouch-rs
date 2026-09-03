@@ -7,7 +7,7 @@ use log::{error, info};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-use ptouch_render::document::{FontSizeUnit, LayoutMode};
+use ptouch_render::document::{FontSizeUnit, LayoutMode, QrErrorCorrection};
 use ptouch_render::image_loader;
 use ptouch_render::text::TextAlign;
 
@@ -93,6 +93,15 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
                 state,
             );
         }
+        LabelElement::QrCode {
+            content,
+            x,
+            y,
+            size,
+            error_correction,
+        } => {
+            changed |= show_qr_properties(ui, content, x, y, size, error_correction, state);
+        }
         LabelElement::CutMark => {
             ui.label("Cut Mark");
             ui.add_space(4.0);
@@ -115,6 +124,58 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
             bounds.x, bounds.y, bounds.width, bounds.height
         ));
     }
+}
+
+/// Show properties for a semantic QR-code element. Returns true if changed.
+fn show_qr_properties(
+    ui: &mut egui::Ui,
+    content: &mut String,
+    x: &mut Option<u32>,
+    y: &mut Option<u32>,
+    size: &mut u32,
+    error_correction: &mut QrErrorCorrection,
+    state: &AppState,
+) -> bool {
+    let mut changed = false;
+    ui.label("QR Content:");
+    changed |= ui
+        .add(
+            egui::TextEdit::multiline(content)
+                .desired_width(f32::INFINITY)
+                .desired_rows(3),
+        )
+        .changed();
+
+    if state.layout == LayoutMode::Positioned {
+        ui.add_space(4.0);
+        changed |= show_position(ui, x, y);
+    }
+
+    ui.horizontal(|ui| {
+        ui.label("Size:");
+        changed |= ui
+            .add(egui::DragValue::new(size).speed(1).range(1..=100_000))
+            .changed();
+        ui.label("px");
+    });
+
+    egui::ComboBox::from_label("Error correction")
+        .selected_text(error_correction.as_str().to_uppercase())
+        .show_ui(ui, |ui| {
+            changed |= ui
+                .selectable_value(error_correction, QrErrorCorrection::Low, "L")
+                .changed();
+            changed |= ui
+                .selectable_value(error_correction, QrErrorCorrection::Medium, "M")
+                .changed();
+            changed |= ui
+                .selectable_value(error_correction, QrErrorCorrection::Quartile, "Q")
+                .changed();
+            changed |= ui
+                .selectable_value(error_correction, QrErrorCorrection::High, "H")
+                .changed();
+        });
+    changed
 }
 
 /// Mutable references to a text element's editable fields.

@@ -8,7 +8,7 @@ Rust tool for Brother P-Touch USB label printers. CLI and GUI.
 
 - Print text labels with custom font, size, alignment and rotation
 - Print images (PNG, JPEG, GIF, BMP, TIFF, WebP, SVG, and more)
-- Compose flow labels or position text and images at exact coordinates
+- Compose flow labels or position text, images, and semantic QR codes at exact coordinates
 - Save and reload designs as self-contained `.ptl` layout files (images
   embedded), then print them from the GUI or CLI
 - Template layouts with `{{name}}` placeholders and batch-print from a CSV
@@ -187,6 +187,24 @@ renders at twice the normal resolution along the tape feed before converting
 text to monochrome. Printer data remains 128 dots across 24 mm tape, while GUI
 and exported previews compensate for the rectangular printer pixels so the
 physical proportions remain accurate.
+
+Version 2 layouts can generate QR codes directly from literal or templated
+content. `size` is the square logical-pixel canvas, including the required
+four-module quiet zone. Modules always use an integer number of pixels and are
+centered when the canvas has extra space. Error correction accepts `l`, `m`,
+`q`, or `h` and defaults to `m`.
+
+```toml
+[[elements]]
+type = "qr"
+content = "https://example.com/items/{{id}}"
+x = 0
+y = 0
+size = 128
+error_correction = "q"
+```
+
+Omit `x` and `y` to use a semantic QR code in a version 2 flow layout.
 
 ### Print options
 
