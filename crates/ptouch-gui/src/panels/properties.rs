@@ -103,12 +103,14 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
         } => {
             changed |= show_qr_properties(
                 ui,
-                content,
-                x,
-                y,
-                size,
-                error_correction,
-                min_module_size,
+                QrProps {
+                    content,
+                    x,
+                    y,
+                    size,
+                    error_correction,
+                    min_module_size,
+                },
                 state,
             );
         }
@@ -137,16 +139,15 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
 }
 
 /// Show properties for a semantic QR-code element. Returns true if changed.
-fn show_qr_properties(
-    ui: &mut egui::Ui,
-    content: &mut String,
-    x: &mut Option<u32>,
-    y: &mut Option<u32>,
-    size: &mut u32,
-    error_correction: &mut QrErrorCorrection,
-    min_module_size: &mut u32,
-    state: &AppState,
-) -> bool {
+fn show_qr_properties(ui: &mut egui::Ui, props: QrProps, state: &AppState) -> bool {
+    let QrProps {
+        content,
+        x,
+        y,
+        size,
+        error_correction,
+        min_module_size,
+    } = props;
     let mut changed = false;
     ui.label("QR Content:");
     changed |= ui
@@ -199,6 +200,16 @@ fn show_qr_properties(
                 .changed();
         });
     changed
+}
+
+/// Mutable references to a QR-code element's editable fields.
+struct QrProps<'a> {
+    content: &'a mut String,
+    x: &'a mut Option<u32>,
+    y: &'a mut Option<u32>,
+    size: &'a mut u32,
+    error_correction: &'a mut QrErrorCorrection,
+    min_module_size: &'a mut u32,
 }
 
 /// Mutable references to a text element's editable fields.
