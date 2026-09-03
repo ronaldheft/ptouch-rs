@@ -16,7 +16,7 @@ use crate::{RenderError, Result};
 /// Runtime printer geometry used to render a document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderTarget {
-    /// Printable dots across the tape.
+    /// Actual printable raster height in dots across the tape.
     pub tape_width_px: u32,
     /// Resolution across the tape.
     pub cross_dpi: u16,
@@ -102,7 +102,7 @@ pub fn render_document(document: &LabelDocument, target: RenderTarget) -> Result
     let mut right_edge = 0;
     let mut text_renderer = TextRenderer::new();
 
-    for element in &document.elements {
+    for (element_index, element) in document.elements.iter().enumerate() {
         let rendered = match element {
             LabelElement::Image {
                 bitmap,
@@ -227,58 +227,64 @@ pub fn render_document(document: &LabelDocument, target: RenderTarget) -> Result
                 *bounds
             }
         };
-        right_edge = right_edge.max(element_bounds.x.saturating_add(element_bounds.width));
+        let element_kind = match element {
+            LabelElement::Image { .. } => "image",
+            LabelElement::QrCode { .. } => "QR code",
+            LabelElement::Text { .. } => "text",
+            LabelElement::CutMark | LabelElement::Padding { .. } => unreachable!(),
+        };
+        let (raster_bounds, element_right_edge) = positioned_raster_bounds(
+            element_bounds,
+            document.dpi,
+            target,
+            element_index,
+            element_kind,
+        )?;
+        right_edge = right_edge.max(element_right_edge);
         bounds.push(element_bounds);
-        positioned.push(rendered);
+        positioned.push((rendered, raster_bounds));
     }
 
-    let logical_width = document
-        .min_length
-        .max(right_edge.saturating_add(document.end_padding));
+    let padded_right_edge = right_edge
+        .checked_add(document.end_padding)
+        .ok_or_else(|| RenderError::Layout("positioned label length is too large".to_string()))?;
+    let logical_width = document.min_length.max(padded_right_edge);
     let mut printer_raster = LabelBitmap::new(
-        scale(logical_width, document.dpi, target.feed_dpi),
+        scale_positioned_edge(logical_width, document.dpi, target.feed_dpi)?,
         target.tape_width_px,
     );
-    for element in positioned {
+    for (element, raster_bounds) in positioned {
         let (image, bounds) = match element {
             PositionedElement::Image {
                 source,
-                bounds,
                 flip_h,
                 flip_v,
+                ..
             } => (
                 source
-                    .scale_to_size(
-                        scale(bounds.width, document.dpi, target.feed_dpi),
-                        scale(bounds.height, document.dpi, target.cross_dpi),
-                    )
+                    .scale_to_size(raster_bounds.width, raster_bounds.height)
                     .mirrored(flip_h, flip_v),
-                bounds,
+                raster_bounds,
             ),
             PositionedElement::Text {
                 coverage,
-                bounds,
                 flip_h,
                 flip_v,
+                ..
             } => {
                 let coverage = image::imageops::resize(
                     &coverage,
-                    scale(bounds.width, document.dpi, target.feed_dpi),
-                    scale(bounds.height, document.dpi, target.cross_dpi),
+                    raster_bounds.width,
+                    raster_bounds.height,
                     image::imageops::FilterType::Triangle,
                 );
                 (
                     LabelBitmap::from_gray_image(&coverage, 127).mirrored(flip_h, flip_v),
-                    bounds,
+                    raster_bounds,
                 )
             }
         };
-        blit(
-            &mut printer_raster,
-            &image,
-            scale(bounds.x, document.dpi, target.feed_dpi),
-            scale(bounds.y, document.dpi, target.cross_dpi),
-        );
+        blit(&mut printer_raster, &image, bounds.x, bounds.y);
     }
 
     if document.flip_h || document.flip_v {
@@ -432,6 +438,66 @@ fn required_coordinate(value: Option<u32>, element: &str, axis: &str) -> Result<
     value.ok_or_else(|| RenderError::Layout(format!("positioned {element} requires {axis}")))
 }
 
+/// Map both edges of a positioned element to the target raster and reject a
+/// bottom edge beyond the printer's actual cross-tape print area. Scaling the
+/// edges (rather than the origin and size independently) keeps a valid element
+/// whose logical bottom edge is exactly on the boundary exactly on the raster
+/// boundary after rounding.
+fn positioned_raster_bounds(
+    bounds: ElementBounds,
+    document_dpi: u16,
+    target: RenderTarget,
+    element_index: usize,
+    element_kind: &str,
+) -> Result<(ElementBounds, u32)> {
+    let element_number = element_index + 1;
+    let right = bounds.x.checked_add(bounds.width).ok_or_else(|| {
+        RenderError::Layout(format!(
+            "positioned {element_kind} element {element_number} has horizontal bounds that are too large"
+        ))
+    })?;
+    let bottom = bounds.y.checked_add(bounds.height).ok_or_else(|| {
+        RenderError::Layout(format!(
+            "positioned {element_kind} element {element_number} has vertical bounds that are too large"
+        ))
+    })?;
+
+    let raster_left = scale_positioned_edge(bounds.x, document_dpi, target.feed_dpi)?;
+    let raster_right = scale_positioned_edge(right, document_dpi, target.feed_dpi)?;
+    let raster_top = scale_positioned_edge(bounds.y, document_dpi, target.cross_dpi)?;
+    let raster_bottom = scale_positioned_edge(bottom, document_dpi, target.cross_dpi)?;
+
+    if raster_bottom > target.tape_width_px {
+        return Err(RenderError::Layout(format!(
+            "positioned {element_kind} element {element_number} exceeds the {} px printable raster height: vertical bounds y={}, height={} at {} dpi map to rows {}..{} at {} dpi",
+            target.tape_width_px,
+            bounds.y,
+            bounds.height,
+            document_dpi,
+            raster_top,
+            raster_bottom,
+            target.cross_dpi,
+        )));
+    }
+
+    Ok((
+        ElementBounds {
+            x: raster_left,
+            y: raster_top,
+            width: raster_right - raster_left,
+            height: raster_bottom - raster_top,
+        },
+        right,
+    ))
+}
+
+fn scale_positioned_edge(value: u32, from_dpi: u16, to_dpi: u16) -> Result<u32> {
+    let scaled =
+        (u64::from(value) * u64::from(to_dpi) + u64::from(from_dpi) / 2) / u64::from(from_dpi);
+    u32::try_from(scaled)
+        .map_err(|_| RenderError::Layout("positioned layout dimensions are too large".to_string()))
+}
+
 fn require_no_rotation(rotation: f32, element: &str) -> Result<()> {
     if rotation.abs() < f32::EPSILON {
         Ok(())
@@ -540,6 +606,164 @@ mod tests {
         assert!(rendered.printer_raster.get_pixel(2, 1));
         assert!(rendered.printer_raster.get_pixel(5, 4));
         assert!(!rendered.printer_raster.get_pixel(6, 4));
+    }
+
+    #[test]
+    fn positioned_image_preserves_scaled_printable_edge_and_rejects_overflow() {
+        let mut source = LabelBitmap::new(1, 1);
+        source.set_pixel(0, 0, true);
+        let image = LabelElement::Image {
+            path: None,
+            image_data: Vec::new(),
+            bitmap: Some(source),
+            x: Some(0),
+            y: Some(1),
+            rotation: 0.0,
+            target_width: Some(25),
+            target_height: Some(106),
+            flip_h: false,
+            flip_v: false,
+        };
+        let mut document = LabelDocument {
+            version: 2,
+            tape_width_mm: 12,
+            dpi: 300,
+            layout: LayoutMode::Positioned,
+            min_length: 0,
+            end_padding: 0,
+            font_name: "sans-serif".to_string(),
+            font_margin: 0,
+            flip_h: false,
+            flip_v: false,
+            elements: vec![image],
+        };
+        let target = RenderTarget {
+            tape_width_px: 64,
+            cross_dpi: 180,
+            feed_dpi: 360,
+        };
+
+        // At 300 document dpi, y=1 and height=106 end exactly at the
+        // 64-row printable edge after scaling to the 180 dpi cross axis.
+        // Scaling y and height independently would instead produce 65 rows.
+        let rendered = render_document(&document, target).unwrap();
+        assert_eq!(
+            (
+                rendered.printer_raster.width(),
+                rendered.printer_raster.height()
+            ),
+            (30, 64)
+        );
+        assert!(rendered.printer_raster.get_pixel(0, 63));
+
+        let LabelElement::Image { y, .. } = &mut document.elements[0] else {
+            unreachable!();
+        };
+        *y = Some(2);
+        let error = render_document(&document, target).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("positioned image element 1"));
+        assert!(message.contains("64 px printable raster height"));
+        assert!(message.contains("rows 1..65 at 180 dpi"));
+    }
+
+    #[test]
+    fn positioned_qr_uses_cross_axis_limit_in_high_quality() {
+        let mut document = LabelDocument {
+            version: 2,
+            tape_width_mm: 12,
+            dpi: 180,
+            layout: LayoutMode::Positioned,
+            min_length: 0,
+            end_padding: 0,
+            font_name: "sans-serif".to_string(),
+            font_margin: 0,
+            flip_h: false,
+            flip_v: false,
+            elements: vec![LabelElement::QrCode {
+                content: "HELLO".to_string(),
+                x: Some(0),
+                y: Some(6),
+                size: 58,
+                error_correction: QrErrorCorrection::Low,
+                min_module_size: 2,
+            }],
+        };
+        let high_quality = RenderTarget {
+            tape_width_px: 64,
+            cross_dpi: 180,
+            feed_dpi: 360,
+        };
+
+        let rendered = render_document(&document, high_quality).unwrap();
+        assert_eq!(
+            (
+                rendered.printer_raster.width(),
+                rendered.printer_raster.height()
+            ),
+            (116, 64)
+        );
+        assert!(rendered.printer_raster.get_pixel(16, 14));
+
+        let LabelElement::QrCode { y, .. } = &mut document.elements[0] else {
+            unreachable!();
+        };
+        *y = Some(7);
+        let error = render_document(&document, high_quality).unwrap_err();
+        assert!(error.to_string().contains("positioned QR code element 1"));
+        assert!(error.to_string().contains("rows 7..65 at 180 dpi"));
+    }
+
+    #[test]
+    fn positioned_text_accepts_exact_bottom_edge_and_rejects_next_row() {
+        let mut document = LabelDocument {
+            version: 2,
+            tape_width_mm: 12,
+            dpi: 180,
+            layout: LayoutMode::Positioned,
+            min_length: 0,
+            end_padding: 0,
+            font_name: "sans-serif".to_string(),
+            font_margin: 0,
+            flip_h: false,
+            flip_v: false,
+            elements: vec![LabelElement::Text {
+                content: "Edge".to_string(),
+                x: Some(0),
+                y: Some(0),
+                font_name: None,
+                font_weight: Some(400),
+                font_size: Some(12.0),
+                font_size_unit: Some(FontSizeUnit::Pixels),
+                align: TextAlign::Left,
+                rotation: 0.0,
+                flip_h: false,
+                flip_v: false,
+            }],
+        };
+        let target = RenderTarget {
+            tape_width_px: 64,
+            cross_dpi: 180,
+            feed_dpi: 180,
+        };
+        let measured = render_document(&document, target).unwrap();
+        let text_height = measured.element_bounds[0].height;
+        assert!(text_height > 0 && text_height < target.tape_width_px);
+
+        let LabelElement::Text { y, .. } = &mut document.elements[0] else {
+            unreachable!();
+        };
+        *y = Some(target.tape_width_px - text_height);
+        render_document(&document, target).unwrap();
+
+        let LabelElement::Text { y, .. } = &mut document.elements[0] else {
+            unreachable!();
+        };
+        *y = Some(target.tape_width_px - text_height + 1);
+        let error = render_document(&document, target).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("positioned text element 1"));
+        assert!(message.contains("64 px printable raster height"));
     }
 
     #[test]

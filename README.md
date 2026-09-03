@@ -188,6 +188,13 @@ text to monochrome. Printer data remains 128 dots across 24 mm tape, while GUI
 and exported previews compensate for the rectangular printer pixels so the
 physical proportions remain accurate.
 
+The full printer-reported printable height is available to positioned elements;
+there is no additional design safe margin. Text, image, and QR bounds are
+converted from the document DPI to the target's cross-tape DPI and must fit
+within that actual raster. An element may end exactly at the printable edge,
+but rendering fails with a layout error if its bottom edge would be clipped.
+High-quality feed-axis scaling does not change this cross-tape limit.
+
 Version 2 layouts can generate QR codes directly from literal or templated
 content. `size` is the square logical-pixel canvas, including the required
 four-module quiet zone. Modules always use an integer number of pixels and are
