@@ -20,6 +20,7 @@ pub fn render_qr(
     content: &str,
     error_correction: QrErrorCorrection,
     size: u32,
+    min_module_size: u32,
 ) -> Result<LabelBitmap> {
     if content.is_empty() {
         return Err(RenderError::Layout(
@@ -31,6 +32,11 @@ pub fn render_qr(
             "QR code size must be greater than zero".to_string(),
         ));
     }
+    if min_module_size == 0 {
+        return Err(RenderError::Layout(
+            "QR code min_module_size must be greater than zero".to_string(),
+        ));
+    }
 
     let code = QrCode::with_error_correction_level(content.as_bytes(), error_correction.into())
         .map_err(|error| RenderError::Layout(format!("QR code encoding failed: {error}")))?;
@@ -38,9 +44,10 @@ pub fn render_qr(
         .map_err(|_| RenderError::Layout("QR code dimensions are too large".to_string()))?;
     let total_modules = symbol_width + QUIET_ZONE_MODULES * 2;
     let module_size = size / total_modules;
-    if module_size == 0 {
+    if module_size < min_module_size {
+        let required_size = total_modules * min_module_size;
         return Err(RenderError::Layout(format!(
-            "QR code requires at least {total_modules} pixels for its symbol and quiet zone, but size is {size}"
+            "QR code requires at least {required_size} pixels for its symbol, quiet zone, and min_module_size {min_module_size}, but size is {size}"
         )));
     }
 
@@ -84,7 +91,7 @@ mod tests {
 
     #[test]
     fn qr_modules_and_quiet_zone_use_whole_pixels() {
-        let bitmap = render_qr("HELLO", QrErrorCorrection::Low, 58).unwrap();
+        let bitmap = render_qr("HELLO", QrErrorCorrection::Low, 58, 2).unwrap();
 
         assert_eq!((bitmap.width(), bitmap.height()), (58, 58));
         // Version 1 is 21 modules wide. With a four-module quiet zone, a
@@ -97,7 +104,13 @@ mod tests {
 
     #[test]
     fn qr_rejects_a_canvas_smaller_than_its_module_matrix() {
-        let error = render_qr("HELLO", QrErrorCorrection::Low, 28).unwrap_err();
+        let error = render_qr("HELLO", QrErrorCorrection::Low, 28, 1).unwrap_err();
         assert!(error.to_string().contains("requires at least 29 pixels"));
+    }
+
+    #[test]
+    fn qr_enforces_the_requested_minimum_module_size() {
+        let error = render_qr("HELLO", QrErrorCorrection::Low, 58, 3).unwrap_err();
+        assert!(error.to_string().contains("requires at least 87 pixels"));
     }
 }

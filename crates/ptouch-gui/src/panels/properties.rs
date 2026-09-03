@@ -99,8 +99,18 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
             y,
             size,
             error_correction,
+            min_module_size,
         } => {
-            changed |= show_qr_properties(ui, content, x, y, size, error_correction, state);
+            changed |= show_qr_properties(
+                ui,
+                content,
+                x,
+                y,
+                size,
+                error_correction,
+                min_module_size,
+                state,
+            );
         }
         LabelElement::CutMark => {
             ui.label("Cut Mark");
@@ -134,6 +144,7 @@ fn show_qr_properties(
     y: &mut Option<u32>,
     size: &mut u32,
     error_correction: &mut QrErrorCorrection,
+    min_module_size: &mut u32,
     state: &AppState,
 ) -> bool {
     let mut changed = false;
@@ -155,6 +166,18 @@ fn show_qr_properties(
         ui.label("Size:");
         changed |= ui
             .add(egui::DragValue::new(size).speed(1).range(1..=100_000))
+            .changed();
+        ui.label("px");
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Minimum module:");
+        changed |= ui
+            .add(
+                egui::DragValue::new(min_module_size)
+                    .speed(1)
+                    .range(1..=100),
+            )
             .changed();
         ui.label("px");
     });

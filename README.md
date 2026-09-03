@@ -192,7 +192,8 @@ Version 2 layouts can generate QR codes directly from literal or templated
 content. `size` is the square logical-pixel canvas, including the required
 four-module quiet zone. Modules always use an integer number of pixels and are
 centered when the canvas has extra space. Error correction accepts `l`, `m`,
-`q`, or `h` and defaults to `m`.
+`q`, or `h` and defaults to `m`. Set `min_module_size` when a printer or
+scanner requires more than the default one logical pixel per module.
 
 ```toml
 [[elements]]
@@ -202,6 +203,7 @@ x = 0
 y = 0
 size = 128
 error_correction = "q"
+min_module_size = 2
 ```
 
 Omit `x` and `y` to use a semantic QR code in a version 2 flow layout.

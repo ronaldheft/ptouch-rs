@@ -58,6 +58,14 @@ fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
+fn default_qr_min_module_size() -> u32 {
+    1
+}
+
+fn is_one(value: &u32) -> bool {
+    *value == 1
+}
+
 /// Default design resolution for layouts saved before the dpi field existed.
 fn default_dpi() -> u16 {
     180
@@ -364,6 +372,9 @@ pub enum LabelElement {
         /// QR error-correction level.
         #[serde(default)]
         error_correction: QrErrorCorrection,
+        /// Smallest allowed square module size in logical pixels.
+        #[serde(default = "default_qr_min_module_size", skip_serializing_if = "is_one")]
+        min_module_size: u32,
     },
     /// A cut mark separator.
     CutMark,
@@ -507,8 +518,10 @@ pub fn render_elements(
                 content,
                 size,
                 error_correction,
+                min_module_size,
                 ..
-            } => crate::qr::render_qr(content, *error_correction, *size)?.fit_height(tape_width_px),
+            } => crate::qr::render_qr(content, *error_correction, *size, *min_module_size)?
+                .fit_height(tape_width_px),
             LabelElement::CutMark => compose::cutmark(tape_width_px),
             LabelElement::Padding { pixels } => compose::padding(tape_width_px, *pixels),
         };
@@ -1227,6 +1240,7 @@ type = "qr"
 content = "https://example.com/returns/{{id}}"
 size = 120
 error_correction = "q"
+min_module_size = 2
 "#;
 
         let mut document = LabelDocument::from_toml_str(text).unwrap();
@@ -1240,11 +1254,13 @@ error_correction = "q"
                 y,
                 size,
                 error_correction,
+                min_module_size,
             } => {
                 assert_eq!(content, "https://example.com/returns/ABC-123");
                 assert_eq!((*x, *y), (None, None));
                 assert_eq!(*size, 120);
                 assert_eq!(*error_correction, QrErrorCorrection::Quartile);
+                assert_eq!(*min_module_size, 2);
             }
             _ => panic!("expected QR code element"),
         }
