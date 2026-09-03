@@ -86,14 +86,10 @@ enum PositionedElement {
 
 /// Render a document for a specific runtime printer target.
 pub fn render_document(document: &LabelDocument, target: RenderTarget) -> Result<RenderedLabel> {
+    document.validate_version()?;
     if document.dpi == 0 || target.cross_dpi == 0 || target.feed_dpi == 0 {
         return Err(RenderError::Layout(
             "document and target resolutions must be greater than zero".to_string(),
-        ));
-    }
-    if document.layout == LayoutMode::Positioned && document.version < 2 {
-        return Err(RenderError::Layout(
-            "positioned layout requires layout version 2".to_string(),
         ));
     }
     if document.layout == LayoutMode::Flow {
@@ -573,6 +569,42 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("requires layout version 2"));
+    }
+
+    #[test]
+    fn renderer_rejects_programmatic_version_one_qr_documents() {
+        let document = LabelDocument {
+            version: 1,
+            tape_width_mm: 24,
+            dpi: 180,
+            layout: LayoutMode::Flow,
+            min_length: 0,
+            end_padding: 0,
+            font_name: "sans-serif".to_string(),
+            font_margin: 0,
+            flip_h: false,
+            flip_v: false,
+            elements: vec![LabelElement::QrCode {
+                content: "HELLO".to_string(),
+                x: None,
+                y: None,
+                size: 58,
+                error_correction: QrErrorCorrection::Low,
+                min_module_size: 2,
+            }],
+        };
+
+        let error = render_document(
+            &document,
+            RenderTarget {
+                tape_width_px: 128,
+                cross_dpi: 180,
+                feed_dpi: 180,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("require layout version 2"));
     }
 
     #[test]

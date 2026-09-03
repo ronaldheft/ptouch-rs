@@ -45,7 +45,9 @@ pub fn render_qr(
     let total_modules = symbol_width + QUIET_ZONE_MODULES * 2;
     let module_size = size / total_modules;
     if module_size < min_module_size {
-        let required_size = total_modules * min_module_size;
+        let required_size = total_modules.checked_mul(min_module_size).ok_or_else(|| {
+            RenderError::Layout("QR code minimum module size is too large".to_string())
+        })?;
         return Err(RenderError::Layout(format!(
             "QR code requires at least {required_size} pixels for its symbol, quiet zone, and min_module_size {min_module_size}, but size is {size}"
         )));
@@ -112,5 +114,15 @@ mod tests {
     fn qr_enforces_the_requested_minimum_module_size() {
         let error = render_qr("HELLO", QrErrorCorrection::Low, 58, 3).unwrap_err();
         assert!(error.to_string().contains("requires at least 87 pixels"));
+    }
+
+    #[test]
+    fn qr_rejects_a_minimum_module_size_that_overflows() {
+        let error = render_qr("HELLO", QrErrorCorrection::Low, 58, u32::MAX).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("minimum module size is too large")
+        );
     }
 }

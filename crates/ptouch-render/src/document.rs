@@ -120,19 +120,26 @@ impl LabelDocument {
     /// into its render cache, so the returned document is ready to render.
     pub fn from_toml_str(text: &str) -> Result<Self> {
         let mut doc: LabelDocument = toml::from_str(text)?;
-        if doc.version == 0 || doc.version > DOCUMENT_VERSION {
+        doc.validate_version()?;
+        doc.decode_image_caches()?;
+        Ok(doc)
+    }
+
+    /// Validate format-version requirements shared by parsed and programmatic documents.
+    pub fn validate_version(&self) -> Result<()> {
+        if self.version == 0 || self.version > DOCUMENT_VERSION {
             return Err(RenderError::Layout(format!(
                 "unsupported layout version {} (this build supports up to {})",
-                doc.version, DOCUMENT_VERSION
+                self.version, DOCUMENT_VERSION
             )));
         }
-        if doc.layout == LayoutMode::Positioned && doc.version < 2 {
+        if self.layout == LayoutMode::Positioned && self.version < 2 {
             return Err(RenderError::Layout(
                 "positioned layout requires layout version 2".to_string(),
             ));
         }
-        if doc.version < 2
-            && doc
+        if self.version < 2
+            && self
                 .elements
                 .iter()
                 .any(|element| matches!(element, LabelElement::QrCode { .. }))
@@ -141,8 +148,7 @@ impl LabelDocument {
                 "QR code elements require layout version 2".to_string(),
             ));
         }
-        doc.decode_image_caches()?;
-        Ok(doc)
+        Ok(())
     }
 
     /// Decode every image element's embedded bytes into its render cache.
@@ -418,14 +424,7 @@ impl LabelElement {
     /// Returns a short display name for the element list.
     pub fn display_name(&self) -> String {
         match self {
-            LabelElement::Text { content, .. } => {
-                let preview: String = content.chars().take(20).collect();
-                if content.chars().count() > 20 {
-                    format!("Text: {}...", preview)
-                } else {
-                    format!("Text: {}", preview)
-                }
-            }
+            LabelElement::Text { content, .. } => content_display_name("Text", content),
             LabelElement::Image { path, .. } => {
                 let name = path
                     .as_ref()
@@ -434,17 +433,19 @@ impl LabelElement {
                     .unwrap_or_else(|| "embedded".to_string());
                 format!("Image: {}", name)
             }
-            LabelElement::QrCode { content, .. } => {
-                let preview: String = content.chars().take(20).collect();
-                if content.chars().count() > 20 {
-                    format!("QR: {}...", preview)
-                } else {
-                    format!("QR: {}", preview)
-                }
-            }
+            LabelElement::QrCode { content, .. } => content_display_name("QR", content),
             LabelElement::CutMark => "Cut Mark".to_string(),
             LabelElement::Padding { pixels } => format!("Padding: {} px", pixels),
         }
+    }
+}
+
+fn content_display_name(kind: &str, content: &str) -> String {
+    let preview: String = content.chars().take(20).collect();
+    if content.chars().count() > 20 {
+        format!("{kind}: {preview}...")
+    } else {
+        format!("{kind}: {preview}")
     }
 }
 
