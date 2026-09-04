@@ -13,6 +13,7 @@ pub mod document;
 pub mod font;
 pub mod image_loader;
 pub mod layout;
+pub mod qr;
 pub mod raster;
 pub mod text;
 

@@ -58,6 +58,14 @@ fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
+fn default_qr_min_module_size() -> u32 {
+    1
+}
+
+fn is_one(value: &u32) -> bool {
+    *value == 1
+}
+
 /// Default design resolution for layouts saved before the dpi field existed.
 fn default_dpi() -> u16 {
     180
@@ -130,6 +138,16 @@ impl LabelDocument {
                 "positioned layout requires layout version 2".to_string(),
             ));
         }
+        if self.version < 2
+            && self
+                .elements
+                .iter()
+                .any(|element| matches!(element, LabelElement::QrCode { .. }))
+        {
+            return Err(RenderError::Layout(
+                "QR code elements require layout version 2".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -155,28 +173,34 @@ impl LabelDocument {
         Ok(())
     }
 
-    /// Collect the unique `{{name}}` placeholder names used in text elements.
+    /// Collect the unique `{{name}}` placeholder names used in semantic elements.
     ///
     /// The result is sorted for stable display and de-duplication.
     pub fn placeholders(&self) -> Vec<String> {
         let mut names = BTreeSet::new();
         for element in &self.elements {
-            if let LabelElement::Text { content, .. } = element {
-                collect_placeholder_names(content, &mut names);
+            match element {
+                LabelElement::Text { content, .. } | LabelElement::QrCode { content, .. } => {
+                    collect_placeholder_names(content, &mut names);
+                }
+                _ => {}
             }
         }
         names.into_iter().collect()
     }
 
-    /// Replace `{{name}}` placeholders in all text elements using `values`.
+    /// Replace `{{name}}` placeholders in all semantic elements using `values`.
     ///
     /// A placeholder with no matching value is replaced with an empty string;
     /// callers that want to reject missing values should check
     /// [`LabelDocument::placeholders`] against the provided keys first.
     pub fn apply_values(&mut self, values: &BTreeMap<String, String>) {
         for element in &mut self.elements {
-            if let LabelElement::Text { content, .. } = element {
-                *content = substitute_placeholders(content, |name| values.get(name).cloned());
+            match element {
+                LabelElement::Text { content, .. } | LabelElement::QrCode { content, .. } => {
+                    *content = substitute_placeholders(content, |name| values.get(name).cloned());
+                }
+                _ => {}
             }
         }
     }
@@ -230,6 +254,36 @@ fn substitute_placeholders(content: &str, lookup: impl Fn(&str) -> Option<String
     }
     result.push_str(rest);
     result
+}
+
+/// Error-correction level for a semantic QR-code element.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QrErrorCorrection {
+    /// Approximately 7% of codewords can be restored.
+    #[serde(rename = "l")]
+    Low,
+    /// Approximately 15% of codewords can be restored.
+    #[default]
+    #[serde(rename = "m")]
+    Medium,
+    /// Approximately 25% of codewords can be restored.
+    #[serde(rename = "q")]
+    Quartile,
+    /// Approximately 30% of codewords can be restored.
+    #[serde(rename = "h")]
+    High,
+}
+
+impl QrErrorCorrection {
+    /// PTL spelling of this correction level.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "l",
+            Self::Medium => "m",
+            Self::Quartile => "q",
+            Self::High => "h",
+        }
+    }
 }
 
 /// A single element in the label composition.
@@ -308,6 +362,26 @@ pub enum LabelElement {
         #[serde(default)]
         flip_v: bool,
     },
+    /// A QR code generated from semantic content at render time.
+    #[serde(rename = "qr")]
+    QrCode {
+        /// Content encoded in the QR symbol. May contain template placeholders.
+        content: String,
+        /// Horizontal coordinate in logical layout pixels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<u32>,
+        /// Vertical coordinate in logical layout pixels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<u32>,
+        /// Width and height of the QR canvas in logical layout pixels.
+        size: u32,
+        /// QR error-correction level.
+        #[serde(default)]
+        error_correction: QrErrorCorrection,
+        /// Smallest allowed square module size in logical pixels.
+        #[serde(default = "default_qr_min_module_size", skip_serializing_if = "is_one")]
+        min_module_size: u32,
+    },
     /// A cut mark separator.
     CutMark,
     /// Horizontal padding in pixels.
@@ -350,14 +424,7 @@ impl LabelElement {
     /// Returns a short display name for the element list.
     pub fn display_name(&self) -> String {
         match self {
-            LabelElement::Text { content, .. } => {
-                let preview: String = content.chars().take(20).collect();
-                if content.chars().count() > 20 {
-                    format!("Text: {}...", preview)
-                } else {
-                    format!("Text: {}", preview)
-                }
-            }
+            LabelElement::Text { content, .. } => content_display_name("Text", content),
             LabelElement::Image { path, .. } => {
                 let name = path
                     .as_ref()
@@ -366,9 +433,19 @@ impl LabelElement {
                     .unwrap_or_else(|| "embedded".to_string());
                 format!("Image: {}", name)
             }
+            LabelElement::QrCode { content, .. } => content_display_name("QR", content),
             LabelElement::CutMark => "Cut Mark".to_string(),
             LabelElement::Padding { pixels } => format!("Padding: {} px", pixels),
         }
+    }
+}
+
+fn content_display_name(kind: &str, content: &str) -> String {
+    let preview: String = content.chars().take(20).collect();
+    if content.chars().count() > 20 {
+        format!("{kind}: {preview}...")
+    } else {
+        format!("{kind}: {preview}")
     }
 }
 
@@ -438,6 +515,14 @@ pub fn render_elements(
                 Some(seg) => seg.mirrored(*flip_h, *flip_v),
                 None => continue,
             },
+            LabelElement::QrCode {
+                content,
+                size,
+                error_correction,
+                min_module_size,
+                ..
+            } => crate::qr::render_qr(content, *error_correction, *size, *min_module_size)?
+                .fit_height(tape_width_px),
             LabelElement::CutMark => compose::cutmark(tape_width_px),
             LabelElement::Padding { pixels } => compose::padding(tape_width_px, *pixels),
         };
@@ -1141,5 +1226,62 @@ elements = []
             }
             _ => panic!("expected image element"),
         }
+    }
+
+    #[test]
+    fn semantic_qr_parses_and_participates_in_template_substitution() {
+        let text = r#"
+version = 2
+tape_width_mm = 24
+font_name = "sans-serif"
+font_margin = 0
+
+[[elements]]
+type = "qr"
+content = "https://example.com/returns/{{id}}"
+size = 120
+error_correction = "q"
+min_module_size = 2
+"#;
+
+        let mut document = LabelDocument::from_toml_str(text).unwrap();
+        assert_eq!(document.placeholders(), vec!["id".to_string()]);
+        document.apply_values(&BTreeMap::from([("id".to_string(), "ABC-123".to_string())]));
+
+        match &document.elements[0] {
+            LabelElement::QrCode {
+                content,
+                x,
+                y,
+                size,
+                error_correction,
+                min_module_size,
+            } => {
+                assert_eq!(content, "https://example.com/returns/ABC-123");
+                assert_eq!((*x, *y), (None, None));
+                assert_eq!(*size, 120);
+                assert_eq!(*error_correction, QrErrorCorrection::Quartile);
+                assert_eq!(*min_module_size, 2);
+            }
+            _ => panic!("expected QR code element"),
+        }
+    }
+
+    #[test]
+    fn semantic_qr_requires_version_two() {
+        let text = r#"
+version = 1
+tape_width_mm = 24
+font_name = "sans-serif"
+font_margin = 0
+
+[[elements]]
+type = "qr"
+content = "hello"
+size = 120
+"#;
+
+        let error = LabelDocument::from_toml_str(text).unwrap_err();
+        assert!(error.to_string().contains("require layout version 2"));
     }
 }

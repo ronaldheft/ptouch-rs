@@ -89,6 +89,10 @@ fn show_layout_section(ui: &mut egui::Ui, state: &mut AppState) {
                         target_height.get_or_insert(state.tape_width_px);
                         *rotation = 0.0;
                     }
+                    crate::state::LabelElement::QrCode { x, y, .. } => {
+                        x.get_or_insert(0);
+                        y.get_or_insert(0);
+                    }
                     crate::state::LabelElement::CutMark
                     | crate::state::LabelElement::Padding { .. } => {}
                 }

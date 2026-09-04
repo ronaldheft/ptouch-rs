@@ -141,6 +141,30 @@ pub fn render_document(document: &LabelDocument, target: RenderTarget) -> Result
                     flip_v: *flip_v,
                 }
             }
+            LabelElement::QrCode {
+                content,
+                x,
+                y,
+                size,
+                error_correction,
+                min_module_size,
+            } => {
+                let x = required_coordinate(*x, "QR code", "x")?;
+                let y = required_coordinate(*y, "QR code", "y")?;
+                let source =
+                    crate::qr::render_qr(content, *error_correction, *size, *min_module_size)?;
+                PositionedElement::Image {
+                    source,
+                    bounds: ElementBounds {
+                        x,
+                        y,
+                        width: *size,
+                        height: *size,
+                    },
+                    flip_h: false,
+                    flip_v: false,
+                }
+            }
             LabelElement::Text {
                 content,
                 x,
@@ -205,6 +229,7 @@ pub fn render_document(document: &LabelDocument, target: RenderTarget) -> Result
         };
         let element_kind = match element {
             LabelElement::Image { .. } => "image",
+            LabelElement::QrCode { .. } => "QR code",
             LabelElement::Text { .. } => "text",
             LabelElement::CutMark | LabelElement::Padding { .. } => unreachable!(),
         };
@@ -550,7 +575,7 @@ fn blit(destination: &mut LabelBitmap, source: &LabelBitmap, x: u32, y: u32) {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::document::{FontSizeUnit, LabelElement, LayoutMode};
+    use crate::document::{FontSizeUnit, LabelElement, LayoutMode, QrErrorCorrection};
     use crate::text::TextAlign;
 
     use super::*;
@@ -687,6 +712,53 @@ mod tests {
     }
 
     #[test]
+    fn positioned_qr_uses_cross_axis_limit_in_high_quality() {
+        let mut document = LabelDocument {
+            version: 2,
+            tape_width_mm: 12,
+            dpi: 180,
+            layout: LayoutMode::Positioned,
+            min_length: 0,
+            end_padding: 0,
+            font_name: "sans-serif".to_string(),
+            font_margin: 0,
+            flip_h: false,
+            flip_v: false,
+            elements: vec![LabelElement::QrCode {
+                content: "HELLO".to_string(),
+                x: Some(0),
+                y: Some(6),
+                size: 58,
+                error_correction: QrErrorCorrection::Low,
+                min_module_size: 2,
+            }],
+        };
+        let high_quality = RenderTarget {
+            tape_width_px: 64,
+            cross_dpi: 180,
+            feed_dpi: 360,
+        };
+
+        let rendered = render_document(&document, high_quality).unwrap();
+        assert_eq!(
+            (
+                rendered.printer_raster.width(),
+                rendered.printer_raster.height()
+            ),
+            (116, 64)
+        );
+        assert!(rendered.printer_raster.get_pixel(16, 14));
+
+        let LabelElement::QrCode { y, .. } = &mut document.elements[0] else {
+            unreachable!();
+        };
+        *y = Some(7);
+        let error = render_document(&document, high_quality).unwrap_err();
+        assert!(error.to_string().contains("positioned QR code element 1"));
+        assert!(error.to_string().contains("rows 7..65 at 180 dpi"));
+    }
+
+    #[test]
     fn positioned_text_accepts_exact_bottom_edge_and_rejects_next_row() {
         let mut document = LabelDocument {
             version: 2,
@@ -768,6 +840,42 @@ mod tests {
     }
 
     #[test]
+    fn renderer_rejects_programmatic_version_one_qr_documents() {
+        let document = LabelDocument {
+            version: 1,
+            tape_width_mm: 24,
+            dpi: 180,
+            layout: LayoutMode::Flow,
+            min_length: 0,
+            end_padding: 0,
+            font_name: "sans-serif".to_string(),
+            font_margin: 0,
+            flip_h: false,
+            flip_v: false,
+            elements: vec![LabelElement::QrCode {
+                content: "HELLO".to_string(),
+                x: None,
+                y: None,
+                size: 58,
+                error_correction: QrErrorCorrection::Low,
+                min_module_size: 2,
+            }],
+        };
+
+        let error = render_document(
+            &document,
+            RenderTarget {
+                tape_width_px: 128,
+                cross_dpi: 180,
+                feed_dpi: 180,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("require layout version 2"));
+    }
+
+    #[test]
     fn high_resolution_image_is_pixel_exact_and_preview_is_physically_square() {
         let mut source = LabelBitmap::new(128, 128);
         for y in 0..128 {
@@ -827,6 +935,108 @@ mod tests {
             rendered.preview.get_pixel(127, 128),
             rendered.printer_raster.get_pixel(127, 64)
         );
+    }
+
+    #[test]
+    fn positioned_qr_is_generated_semantically_at_each_target_resolution() {
+        let document = LabelDocument {
+            version: 2,
+            tape_width_mm: 24,
+            dpi: 180,
+            layout: LayoutMode::Positioned,
+            min_length: 58,
+            end_padding: 0,
+            font_name: "sans-serif".to_string(),
+            font_margin: 0,
+            flip_h: false,
+            flip_v: false,
+            elements: vec![LabelElement::QrCode {
+                content: "HELLO".to_string(),
+                x: Some(0),
+                y: Some(0),
+                size: 58,
+                error_correction: QrErrorCorrection::Low,
+                min_module_size: 2,
+            }],
+        };
+        let target = |feed_dpi| RenderTarget {
+            tape_width_px: 58,
+            cross_dpi: 180,
+            feed_dpi,
+        };
+
+        let standard = render_document(&document, target(180)).unwrap();
+        let high = render_document(&document, target(360)).unwrap();
+
+        assert_eq!(
+            standard.element_bounds,
+            vec![ElementBounds {
+                x: 0,
+                y: 0,
+                width: 58,
+                height: 58,
+            }]
+        );
+        assert_eq!(
+            (standard.printer_raster.width(), standard.preview.height()),
+            (58, 58)
+        );
+        assert_eq!(
+            (high.printer_raster.width(), high.preview.height()),
+            (116, 116)
+        );
+        // The first dark finder module is 8 logical pixels from the edge. At
+        // high quality it becomes four feed-axis dots by two cross-axis dots.
+        assert!(standard.printer_raster.get_pixel(8, 8));
+        assert!(standard.printer_raster.get_pixel(9, 9));
+        assert!(high.printer_raster.get_pixel(16, 8));
+        assert!(high.printer_raster.get_pixel(19, 9));
+        // The seven-module-wide finder border ends at x=43; its separator is white.
+        assert!(high.printer_raster.get_pixel(43, 9));
+        assert!(!high.printer_raster.get_pixel(44, 9));
+    }
+
+    #[test]
+    fn flow_qr_preserves_square_physical_modules_at_high_resolution() {
+        let document = LabelDocument {
+            version: 2,
+            tape_width_mm: 24,
+            dpi: 180,
+            layout: LayoutMode::Flow,
+            min_length: 0,
+            end_padding: 0,
+            font_name: "sans-serif".to_string(),
+            font_margin: 0,
+            flip_h: false,
+            flip_v: false,
+            elements: vec![LabelElement::QrCode {
+                content: "HELLO".to_string(),
+                x: None,
+                y: None,
+                size: 58,
+                error_correction: QrErrorCorrection::Low,
+                min_module_size: 2,
+            }],
+        };
+
+        let high = render_document(
+            &document,
+            RenderTarget {
+                tape_width_px: 64,
+                cross_dpi: 180,
+                feed_dpi: 360,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            (high.printer_raster.width(), high.printer_raster.height()),
+            (116, 64)
+        );
+        assert_eq!((high.preview.width(), high.preview.height()), (116, 128));
+        // Flow centering contributes three blank rows around the 58-pixel QR.
+        assert!(high.printer_raster.get_pixel(16, 11));
+        assert!(high.printer_raster.get_pixel(19, 12));
     }
 
     #[test]
