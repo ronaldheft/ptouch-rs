@@ -17,10 +17,9 @@ use crate::device::DeviceFlags;
 
 /// Print quality mode.
 ///
-/// On 360 dpi printers the head resolution is fixed at 360 dpi across the
-/// tape, but the feed resolution along the tape can be doubled (high
-/// resolution, 360x720) or halved (draft, 360x180). Physical label length
-/// is preserved by duplicating or dropping raster lines.
+/// Legacy 360 dpi printers duplicate or drop raster lines for high resolution
+/// and draft. Native feed-resolution printers instead consume raster data
+/// rendered at their higher feed density (180x360 dpi on the PT-P710BT).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrintQuality {
     /// Normal 1:1 printing (e.g. 360x360 dpi).
@@ -31,6 +30,38 @@ pub enum PrintQuality {
     HighRes,
     /// Draft / high speed: half feed resolution (e.g. 360x180 dpi).
     Draft,
+}
+
+/// Return whether a device supports the requested print quality.
+pub fn supports_print_quality(flags: DeviceFlags, quality: PrintQuality) -> bool {
+    match quality {
+        PrintQuality::Standard => true,
+        PrintQuality::HighRes => {
+            flags.intersects(DeviceFlags::LEGACY_HIRES | DeviceFlags::FEED_HIRES)
+        }
+        PrintQuality::Draft => flags.contains(DeviceFlags::LEGACY_HIRES),
+    }
+}
+
+/// Feed-axis resolution multiplier the renderer must provide.
+///
+/// Legacy high-resolution devices expand raster lines in the protocol layer,
+/// while native devices consume caller-rendered feed samples. With no device,
+/// high-resolution export uses the native 2x geometry.
+pub fn render_feed_scale(quality: PrintQuality, flags: Option<DeviceFlags>) -> u16 {
+    if quality != PrintQuality::HighRes {
+        return 1;
+    }
+    match flags {
+        Some(flags)
+            if flags.contains(DeviceFlags::FEED_HIRES)
+                && !flags.contains(DeviceFlags::LEGACY_HIRES) =>
+        {
+            2
+        }
+        Some(_) => 1,
+        None => 2,
+    }
 }
 
 /// Construct the initialization sequence.
@@ -297,18 +328,23 @@ pub fn build_print_job(lines: &[Vec<u8>], flags: DeviceFlags, opts: &JobOptions)
     let use_packbits = flags.contains(DeviceFlags::RASTER_PACKBITS);
     let is_d460bt = flags.contains(DeviceFlags::D460BT_MAGIC);
 
-    // Quality modes change the feed resolution along the tape. Keep the
-    // physical length by duplicating lines (high resolution) or dropping
-    // every other line (draft).
-    let quality = if flags.contains(DeviceFlags::LEGACY_HIRES) {
+    // Quality modes change the feed resolution along the tape. Legacy devices
+    // keep physical length by duplicating lines (high resolution) or dropping
+    // every other line (draft). Native feed-resolution devices receive the
+    // caller-rendered high-resolution lines unchanged.
+    let quality = if supports_print_quality(flags, opts.quality) {
         opts.quality
     } else {
         PrintQuality::Standard
     };
-    let (repeat, step) = match quality {
-        PrintQuality::Standard => (1, 1),
-        PrintQuality::HighRes => (2, 1),
-        PrintQuality::Draft => (1, 2),
+    let (repeat, step) = if flags.contains(DeviceFlags::LEGACY_HIRES) {
+        match quality {
+            PrintQuality::Standard => (1, 1),
+            PrintQuality::HighRes => (2, 1),
+            PrintQuality::Draft => (1, 2),
+        }
+    } else {
+        (1, 1)
     };
     let selected: Vec<&Vec<u8>> = lines.iter().step_by(step).collect();
     let line_count = (selected.len() * repeat) as u32;
@@ -317,12 +353,15 @@ pub fn build_print_job(lines: &[Vec<u8>], flags: DeviceFlags, opts: &JobOptions)
 
     job.push(cmd_raster_start(flags));
 
-    // The standard quality path stays byte identical to the verified
-    // stream; quality commands are only sent when a non-default mode is
-    // requested on a device that supports it.
+    // Preserve the verified legacy command stream. PT-P710BT has no half-cut
+    // bit; its no-chain bit must agree with the final print command. Explicitly
+    // select normal mode too, so a standard job can follow a high-resolution
+    // job without reinitializing the printer. Brother raster reference, p. 33.
     if flags.contains(DeviceFlags::LEGACY_HIRES) && quality != PrintQuality::Standard {
         job.push(cmd_legacy_info(opts.media_width, quality));
         job.push(cmd_advanced_mode(quality, false, true, true));
+    } else if flags.contains(DeviceFlags::FEED_HIRES) {
+        job.push(cmd_advanced_mode(quality, false, !opts.chain_print, false));
     }
 
     if flags.contains(DeviceFlags::USE_INFO_CMD) {
@@ -671,6 +710,43 @@ mod tests {
     }
 
     #[test]
+    fn test_job_native_feed_hires_keeps_caller_rendered_lines() {
+        let lines = vec![vec![0xAA], vec![0x55]];
+        let options = JobOptions {
+            media_width: 24,
+            quality: PrintQuality::HighRes,
+            ..JobOptions::default()
+        };
+        let flags = DeviceFlags::RASTER_PACKBITS.union(DeviceFlags::FEED_HIRES);
+        let bytes = flat(&build_print_job(&lines, flags, &options));
+
+        assert!(!bytes.windows(3).any(|window| window == [0x1B, 0x69, 0x63]));
+        assert!(
+            bytes
+                .windows(4)
+                .any(|window| window == [0x1B, 0x69, 0x4B, 0x48])
+        );
+        assert_eq!(bytes.iter().filter(|&&byte| byte == 0x47).count(), 2);
+    }
+
+    #[test]
+    fn test_render_feed_scale_distinguishes_native_legacy_and_offline_targets() {
+        assert_eq!(
+            render_feed_scale(PrintQuality::HighRes, Some(DeviceFlags::FEED_HIRES)),
+            2
+        );
+        assert_eq!(
+            render_feed_scale(PrintQuality::HighRes, Some(DeviceFlags::LEGACY_HIRES)),
+            1
+        );
+        assert_eq!(
+            render_feed_scale(PrintQuality::Standard, Some(DeviceFlags::FEED_HIRES)),
+            1
+        );
+        assert_eq!(render_feed_scale(PrintQuality::HighRes, None), 2);
+    }
+
+    #[test]
     fn test_job_draft_quality() {
         // Draft halves the feed resolution: every other line is dropped.
         let lines = vec![vec![0x01], vec![0x02], vec![0x03]];
@@ -706,5 +782,54 @@ mod tests {
         assert!(!bytes.windows(3).any(|w| w == [0x1B, 0x69, 0x63]));
         // Lines are not duplicated either.
         assert_eq!(bytes.iter().filter(|&&b| b == 0x47).count(), 1);
+    }
+
+    #[test]
+    fn native_quality_commands_preserve_chaining_and_reset_standard_mode() {
+        let flags = DeviceFlags::RASTER_PACKBITS | DeviceFlags::FEED_HIRES;
+        for (quality, mode) in [(PrintQuality::Standard, 0), (PrintQuality::HighRes, 0x40)] {
+            for chain_print in [false, true] {
+                let options = JobOptions {
+                    quality,
+                    chain_print,
+                    ..JobOptions::default()
+                };
+                let job = build_print_job(&[vec![0xaa], vec![0x55]], flags, &options);
+                assert_eq!(
+                    job[1],
+                    vec![0x1b, 0x69, 0x4b, mode | if chain_print { 0 } else { 8 }]
+                );
+                assert_eq!(job.last().unwrap(), &cmd_finalize(chain_print, flags));
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_quality_keeps_the_standard_stream_for_other_models() {
+        for device in crate::device::supported_devices() {
+            if !device
+                .flags
+                .intersects(DeviceFlags::FEED_HIRES | DeviceFlags::LEGACY_HIRES)
+            {
+                let standard = build_print_job(&[vec![0xaa]], device.flags, &JobOptions::default());
+                for quality in [PrintQuality::HighRes, PrintQuality::Draft] {
+                    assert!(!supports_print_quality(device.flags, quality));
+                    let options = JobOptions {
+                        quality,
+                        ..JobOptions::default()
+                    };
+                    assert_eq!(
+                        standard,
+                        build_print_job(&[vec![0xaa]], device.flags, &options)
+                    );
+                }
+            }
+        }
+        let native: Vec<_> = crate::device::supported_devices()
+            .iter()
+            .filter(|device| device.flags.contains(DeviceFlags::FEED_HIRES))
+            .map(|device| device.name)
+            .collect();
+        assert_eq!(native, vec!["PT-P710BT"]);
     }
 }

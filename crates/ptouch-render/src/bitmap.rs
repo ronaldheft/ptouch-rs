@@ -441,6 +441,30 @@ impl LabelBitmap {
         result
     }
 
+    /// Scale to exact dimensions using nearest-neighbor sampling.
+    pub fn scale_to_size(&self, target_width: u32, target_height: u32) -> LabelBitmap {
+        if self.width == 0 || self.height == 0 || target_width == 0 || target_height == 0 {
+            return LabelBitmap::new(target_width, target_height);
+        }
+        if self.width == target_width && self.height == target_height {
+            return self.clone();
+        }
+
+        let mut result = LabelBitmap::new(target_width, target_height);
+        for y in 0..target_height {
+            let src_y = ((u64::from(y) * u64::from(self.height)) / u64::from(target_height))
+                .min(u64::from(self.height - 1)) as u32;
+            for x in 0..target_width {
+                let src_x = ((u64::from(x) * u64::from(self.width)) / u64::from(target_width))
+                    .min(u64::from(self.width - 1)) as u32;
+                if self.get_pixel(src_x, src_y) {
+                    result.set_pixel(x, y, true);
+                }
+            }
+        }
+        result
+    }
+
     /// Access the raw packed bit data.
     pub fn data(&self) -> &[u8] {
         &self.data
