@@ -74,6 +74,9 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
                 state,
             );
         }
+        LabelElement::QrCode { .. } => {
+            ui.label("QR properties require the QR editor enhancement.");
+        }
         LabelElement::CutMark => {
             ui.label("Cut Mark");
             ui.add_space(4.0);
