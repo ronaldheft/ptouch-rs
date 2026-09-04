@@ -20,6 +20,11 @@ pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
         if ui.button("Add Text").clicked() {
             state.elements.push(LabelElement::Text {
                 content: "Label".to_string(),
+                x: None,
+                y: None,
+                font_name: None,
+                font_weight: None,
+                font_size_unit: None,
                 font_size: None,
                 align: TextAlign::Left,
                 rotation: 0.0,
@@ -133,7 +138,10 @@ fn do_save_layout(state: &mut AppState) {
     }
 
     let document = LabelDocument {
-        version: ptouch_render::document::DOCUMENT_VERSION,
+        version: 1,
+        layout: ptouch_render::document::LayoutMode::Flow,
+        min_length: 0,
+        end_padding: 0,
         tape_width_mm: state.tape_width_mm,
         dpi: state.printer_dpi,
         font_name: state.font_name.clone(),
@@ -191,6 +199,11 @@ fn do_open_layout(state: &mut AppState) {
 
     match LabelDocument::from_toml_str(&text) {
         Ok(document) => {
+            // Positioned editing arrives separately; never silently flatten a v2 file.
+            if document.version != 1 {
+                state.status_message = "This editor supports version 1 flow layouts only".into();
+                return;
+            }
             state.tape_width_mm = document.tape_width_mm;
             state.update_tape_pixels();
             state.font_name = document.font_name;

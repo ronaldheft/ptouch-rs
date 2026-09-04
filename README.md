@@ -8,12 +8,13 @@ Rust tool for Brother P-Touch USB label printers. CLI and GUI.
 
 - Print text labels with custom font, size, alignment and rotation
 - Print images (PNG, JPEG, GIF, BMP, TIFF, WebP, SVG, and more)
-- Compose multi-element labels (text + image + cut mark + padding)
+- Compose flow labels or position text and images at exact coordinates
 - Save and reload designs as self-contained `.ptl` layout files (images
   embedded), then print them from the GUI or CLI
 - Template layouts with `{{name}}` placeholders and batch-print from a CSV
 - Chain print and multi-copy support
-- Print quality modes on 360 dpi models (high resolution 360x720, draft 360x180)
+- Print quality modes on supported models, including native 360x180
+  high-resolution rendering
 - GUI with live preview, zoom, and drag-and-drop element reordering
 - Export to image (PNG, JPEG, BMP, GIF, TIFF, WebP) without a printer connected
 - Feed and cut tape without printing
@@ -139,6 +140,63 @@ ptouch print --layout badge.ptl --csv people.csv -o 'badge-{n}.png'
 # CSV from stdin, with a constant value applied to every row
 cat people.csv | ptouch print --layout badge.ptl --csv - --set dept=Eng
 ```
+
+### Positioned layouts
+
+Version 1 `.ptl` files keep their existing left-to-right `flow` behavior.
+Version 2 adds `layout = "positioned"` in the CLI renderer, where coordinates and dimensions are
+logical pixels at the document `dpi`. Each text element can override the
+document font family and select its own weight, size, and size unit (`pt` or
+`px`). The final tape length is the larger of `min_length` and the rightmost
+element edge plus `end_padding`.
+
+```toml
+version = 2
+tape_width_mm = 24
+dpi = 180
+layout = "positioned"
+min_length = 230
+end_padding = 3
+font_name = "Inter"
+font_margin = 0
+
+[[elements]]
+type = "text"
+content = "{{brand}}"
+x = 141
+y = 3
+font_name = "Inter"
+font_weight = 700
+font_size = 8
+font_size_unit = "pt"
+
+[[elements]]
+type = "text"
+content = "{{model}}"
+x = 141
+y = 28
+font_name = "Inter"
+font_weight = 300
+font_size = 8
+font_size_unit = "pt"
+```
+
+GUI editing of version 2 documents is a separate follow-up; this version of
+the GUI continues to save version 1 flow documents and rejects version 2 input.
+
+Positioned images use `x`, `y`, `target_width`, and `target_height`; images
+saved by the GUI remain embedded in the layout. On the PT-P710BT, high quality
+renders at twice the normal resolution along the tape feed before converting
+text to monochrome. Printer data remains 128 dots across 24 mm tape, while GUI
+and exported previews compensate for the rectangular printer pixels so the
+physical proportions remain accurate.
+
+The full printer-reported printable height is available to positioned elements;
+there is no additional design safe margin. Text and image bounds are
+converted from the document DPI to the target's cross-tape DPI and must fit
+within that actual raster. An element may end exactly at the printable edge,
+but rendering fails with a layout error if its bottom edge would be clipped.
+High-quality feed-axis scaling does not change this cross-tape limit.
 
 ### Print options
 
@@ -283,17 +341,3 @@ The MIT-licensed files are reusable on their own under the MIT license (see
 [LICENSE-MIT](LICENSE-MIT)). Any program that links `ptouch-core`, including the
 binaries in this repository, is covered by the GPLv3. See [NOTICE](NOTICE) for
 attribution details.
-
-### Native feed-resolution API
-
-The PT-P710BT accepts caller-rendered raster lines at 360 dpi along the feed
-and 180 dpi across the tape. `FEED_HIRES` distinguishes this input contract
-from legacy printers, whose high-resolution lines are duplicated internally.
-The CLI continues to reject native high quality until its target-aware renderer
-is available. Standard printing and all legacy quality modes remain available.
-
-The Brother PT-E550W/PT-P750W/PT-P710BT raster reference documents the
-resolution on p. 13 and the advanced-mode bits on p. 33. Only PT-P710BT is
-opted in. Each job selects its quality and chain setting; its unused half-cut
-bit is left clear. Standard jobs explicitly reset the native high-resolution
-mode so they can follow high-quality jobs in the same session.
