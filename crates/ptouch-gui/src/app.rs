@@ -7,7 +7,7 @@ use std::sync::mpsc;
 
 use log::{error, info};
 
-use ptouch_render::text::TextRenderer;
+use ptouch_render::layout::{RenderTarget, render_document};
 
 use crate::panels;
 use crate::printer_worker;
@@ -17,8 +17,6 @@ use crate::state::{AppState, PrinterResponse};
 pub struct PtouchApp {
     /// Application state shared across all panels.
     pub state: AppState,
-    /// Text renderer instance for generating label bitmaps.
-    renderer: TextRenderer,
     /// Receiver for responses from the printer worker thread.
     resp_rx: mpsc::Receiver<PrinterResponse>,
 }
@@ -45,7 +43,6 @@ impl PtouchApp {
                 printer_cmd_tx: Some(cmd_tx),
                 ..AppState::default()
             },
-            renderer: TextRenderer::new(),
             resp_rx,
         }
     }
@@ -56,18 +53,20 @@ impl PtouchApp {
 
         if self.state.elements.is_empty() {
             self.state.preview_bitmap = None;
+            self.state.printer_bitmap = None;
             self.state.preview_texture = None;
+            self.state.element_bounds.clear();
             return;
         }
 
-        let result = match ptouch_render::document::render_elements(
-            &self.state.elements,
+        let target = RenderTarget::for_print_quality(
             self.state.tape_width_px,
-            &self.state.font_name,
-            self.state.font_margin,
-            &mut self.renderer,
-        ) {
-            Ok(result) => result,
+            self.state.render_dpi(),
+            self.state.print_quality,
+            self.state.printer_flags,
+        );
+        let result = match render_document(&self.state.to_document(), target) {
+            Ok(result) => Some(result),
             Err(e) => {
                 error!("Render failed: {}", e);
                 self.state.status_message = format!("Render error: {}", e);
@@ -75,12 +74,8 @@ impl PtouchApp {
             }
         };
 
-        // Whole-label mirroring is applied once, after the elements are
-        // composed, independently of any per-element flips.
-        let result =
-            result.map(|bmp| bmp.mirrored(self.state.overall_flip_h, self.state.overall_flip_v));
-
-        if let Some(ref bitmap) = result {
+        if let Some(ref rendered) = result {
+            let bitmap = &rendered.preview;
             let rgba = bitmap.to_rgba_image();
             let max_side = ctx.input(|i| i.max_texture_side);
 
@@ -109,7 +104,15 @@ impl PtouchApp {
             self.state.preview_texture = None;
         }
 
-        self.state.preview_bitmap = result;
+        if let Some(rendered) = result {
+            self.state.preview_bitmap = Some(rendered.preview);
+            self.state.printer_bitmap = Some(rendered.printer_raster);
+            self.state.element_bounds = rendered.element_bounds;
+        } else {
+            self.state.preview_bitmap = None;
+            self.state.printer_bitmap = None;
+            self.state.element_bounds.clear();
+        }
         info!("Preview updated");
     }
 }
@@ -126,16 +129,22 @@ impl eframe::App for PtouchApp {
                     media_type,
                     max_px,
                     dpi,
-                    quality_modes,
+                    flags,
                 } => {
+                    let old_dpi = self.state.printer_dpi;
+                    let old_flags = self.state.printer_flags;
+                    let old_quality = self.state.print_quality;
                     self.state.printer_connected = true;
                     self.state.operation_in_progress = false;
                     self.state.printer_max_px = max_px;
                     self.state.printer_dpi = dpi;
-                    self.state.printer_quality_modes = quality_modes;
+                    self.state.printer_flags = Some(flags);
                     // A stale non-standard quality from a previous printer
                     // would make every print fail with the selector hidden.
-                    if !quality_modes {
+                    if !ptouch_core::protocol::supports_print_quality(
+                        flags,
+                        self.state.print_quality,
+                    ) {
                         self.state.print_quality = ptouch_core::protocol::PrintQuality::Standard;
                     }
                     self.state.printer_model =
@@ -148,7 +157,11 @@ impl eframe::App for PtouchApp {
                     // have changed. Only re-render when they actually did.
                     let old_px = self.state.tape_width_px;
                     self.state.update_tape_pixels();
-                    if self.state.tape_width_px != old_px {
+                    if self.state.tape_width_px != old_px
+                        || self.state.printer_dpi != old_dpi
+                        || self.state.printer_flags != old_flags
+                        || self.state.print_quality != old_quality
+                    {
                         self.state.mark_dirty();
                     }
                 }

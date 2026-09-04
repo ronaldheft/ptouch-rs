@@ -5,8 +5,10 @@
 
 use log::info;
 
-use ptouch_core::protocol::PrintQuality;
+use ptouch_core::device::DeviceFlags;
+use ptouch_core::protocol::{PrintQuality, supports_print_quality};
 use ptouch_core::tape;
+use ptouch_render::document::{FontSizeUnit, LayoutMode};
 
 use crate::state::{AppState, PrinterCommand};
 
@@ -17,12 +19,104 @@ pub fn show_sidebar(ui: &mut egui::Ui, state: &mut AppState) {
         ui.separator();
         show_tape_section(ui, state);
         ui.separator();
+        show_layout_section(ui, state);
+        ui.separator();
         show_print_options(ui, state);
         ui.separator();
         show_mirror_section(ui, state);
         ui.separator();
         show_elements_section(ui, state);
     });
+}
+
+/// Document layout mode and positioned-canvas sizing.
+fn show_layout_section(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.heading("Layout");
+    ui.add_space(4.0);
+
+    let previous = state.layout;
+    egui::ComboBox::from_label("Mode")
+        .selected_text(match state.layout {
+            LayoutMode::Flow => "Flow",
+            LayoutMode::Positioned => "Positioned",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut state.layout, LayoutMode::Flow, "Flow");
+            let has_flow_only = state.elements.iter().any(|element| {
+                matches!(
+                    element,
+                    crate::state::LabelElement::CutMark
+                        | crate::state::LabelElement::Padding { .. }
+                )
+            });
+            ui.add_enabled_ui(!has_flow_only, |ui| {
+                ui.selectable_value(&mut state.layout, LayoutMode::Positioned, "Positioned");
+            })
+            .response
+            .on_disabled_hover_text(
+                "Remove cut marks and padding before switching to positioned layout.",
+            );
+        });
+    if state.layout != previous {
+        if state.layout == LayoutMode::Positioned {
+            for element in &mut state.elements {
+                match element {
+                    crate::state::LabelElement::Text {
+                        x,
+                        y,
+                        font_weight,
+                        font_size,
+                        font_size_unit,
+                        rotation,
+                        ..
+                    } => {
+                        x.get_or_insert(0);
+                        y.get_or_insert(0);
+                        font_weight.get_or_insert(400);
+                        font_size.get_or_insert(12.0);
+                        font_size_unit.get_or_insert(FontSizeUnit::Points);
+                        *rotation = 0.0;
+                    }
+                    crate::state::LabelElement::Image {
+                        x,
+                        y,
+                        target_height,
+                        rotation,
+                        ..
+                    } => {
+                        x.get_or_insert(0);
+                        y.get_or_insert(0);
+                        target_height.get_or_insert(state.tape_width_px);
+                        *rotation = 0.0;
+                    }
+                    crate::state::LabelElement::CutMark
+                    | crate::state::LabelElement::Padding { .. } => {}
+                }
+            }
+        }
+        state.mark_dirty();
+    }
+
+    if state.layout == LayoutMode::Positioned {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label("Minimum length:");
+            changed |= ui
+                .add(egui::DragValue::new(&mut state.min_length).range(0..=100_000))
+                .changed();
+            ui.label("px");
+        });
+        ui.horizontal(|ui| {
+            ui.label("End padding:");
+            changed |= ui
+                .add(egui::DragValue::new(&mut state.end_padding).range(0..=10_000))
+                .changed();
+            ui.label("px");
+        });
+        if changed {
+            state.mark_dirty();
+        }
+    }
 }
 
 /// Printer connection section.
@@ -52,7 +146,7 @@ fn show_tape_section(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading("Tape");
     ui.add_space(4.0);
 
-    let tapes = tape::supported_tapes(state.printer_dpi);
+    let tapes = tape::supported_tapes(state.render_dpi());
     let current_label = format!("{} mm ({} px)", state.tape_width_mm, state.tape_width_px);
 
     egui::ComboBox::from_label("Width")
@@ -82,12 +176,16 @@ fn show_print_options(ui: &mut egui::Ui, state: &mut AppState) {
         ui.add(crate::widgets::toggle(&mut state.auto_cut));
     });
 
-    if state.printer_quality_modes {
+    if state
+        .printer_flags
+        .is_some_and(|flags| flags.intersects(DeviceFlags::LEGACY_HIRES | DeviceFlags::FEED_HIRES))
+    {
         let quality_label = |q: PrintQuality| match q {
             PrintQuality::Standard => "Standard",
             PrintQuality::HighRes => "High resolution",
             PrintQuality::Draft => "Draft (high speed)",
         };
+        let previous = state.print_quality;
         egui::ComboBox::from_label("Quality")
             .selected_text(quality_label(state.print_quality))
             .show_ui(ui, |ui| {
@@ -95,10 +193,19 @@ fn show_print_options(ui: &mut egui::Ui, state: &mut AppState) {
                     PrintQuality::Standard,
                     PrintQuality::HighRes,
                     PrintQuality::Draft,
-                ] {
+                ]
+                .into_iter()
+                .filter(|quality| {
+                    state
+                        .printer_flags
+                        .is_some_and(|flags| supports_print_quality(flags, *quality))
+                }) {
                     ui.selectable_value(&mut state.print_quality, q, quality_label(q));
                 }
             });
+        if state.print_quality != previous {
+            state.mark_dirty();
+        }
     }
 }
 
