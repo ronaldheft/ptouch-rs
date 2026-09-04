@@ -61,6 +61,7 @@ pub struct LabelDocument {
 impl LabelDocument {
     /// Serialize the document to a TOML string.
     pub fn to_toml_string(&self) -> Result<String> {
+        self.validate_version()?;
         Ok(toml::to_string(self)?)
     }
 
@@ -70,14 +71,21 @@ impl LabelDocument {
     /// into its render cache, so the returned document is ready to render.
     pub fn from_toml_str(text: &str) -> Result<Self> {
         let mut doc: LabelDocument = toml::from_str(text)?;
-        if doc.version == 0 || doc.version > DOCUMENT_VERSION {
+        doc.validate_version()?;
+        doc.decode_image_caches()?;
+        Ok(doc)
+    }
+
+    /// Validate the version for parsed and programmatically constructed documents.
+    pub fn validate_version(&self) -> Result<()> {
+        if self.version == 0 || self.version > DOCUMENT_VERSION {
             return Err(RenderError::Layout(format!(
                 "unsupported layout version {} (this build supports up to {})",
-                doc.version, DOCUMENT_VERSION
+                self.version, DOCUMENT_VERSION
             )));
         }
-        if doc.version < 2
-            && doc
+        if self.version < 2
+            && self
                 .elements
                 .iter()
                 .any(|element| matches!(element, LabelElement::QrCode { .. }))
@@ -86,8 +94,7 @@ impl LabelDocument {
                 "QR code elements require layout version 2".into(),
             ));
         }
-        doc.decode_image_caches()?;
-        Ok(doc)
+        Ok(())
     }
 
     /// Decode every image element's embedded bytes into its render cache.
@@ -892,7 +899,8 @@ mod tests {
             flip_v: false,
             elements: vec![LabelElement::CutMark],
         };
-        let text = doc.to_toml_string().unwrap();
+        assert!(doc.to_toml_string().is_err());
+        let text = toml::to_string(&doc).unwrap();
         assert!(LabelDocument::from_toml_str(&text).is_err());
     }
 
@@ -1068,5 +1076,17 @@ size = 120
 
         let error = LabelDocument::from_toml_str(text).unwrap_err();
         assert!(error.to_string().contains("require layout version 2"));
+    }
+    #[test]
+    fn serialization_rejects_programmatic_qr_in_version_one() {
+        let mut document = sample_document();
+        document.version = 1;
+        document.elements.push(LabelElement::QrCode {
+            content: "hello".into(),
+            size: 58,
+            error_correction: QrErrorCorrection::Low,
+            min_module_size: 2,
+        });
+        assert!(document.to_toml_string().is_err());
     }
 }
