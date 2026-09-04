@@ -57,10 +57,12 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
             bitmap,
             rotation,
             target_height,
+            target_width,
             flip_h,
             flip_v,
             ..
         } => {
+            changed |= show_logical_width(ui, target_width);
             changed |= show_image_properties(
                 ui,
                 ImageProps {
@@ -495,5 +497,27 @@ fn show_padding_properties(ui: &mut egui::Ui, pixels: &mut u32) -> bool {
         }
     });
 
+    changed
+}
+
+fn show_logical_width(ui: &mut egui::Ui, width: &mut Option<u32>) -> bool {
+    let mut changed = false;
+    let mut automatic = width.is_none();
+    if ui
+        .checkbox(&mut automatic, "Automatic image width")
+        .changed()
+    {
+        *width = if automatic { None } else { Some(128) };
+        changed = true;
+    }
+    if let Some(width) = width {
+        ui.horizontal(|ui| {
+            ui.label("Logical width:");
+            changed |= ui
+                .add(egui::DragValue::new(width).range(1..=100_000))
+                .changed();
+            ui.label("px");
+        });
+    }
     changed
 }

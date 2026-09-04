@@ -305,3 +305,11 @@ image sizing remains unchanged. The GUI controls are a separate contribution.
 Rust API compatibility: Image variant fields require updates to downstream
 constructors or exhaustive matches. This is separate from existing PTL file
 compatibility; older flow files remain supported.
+
+### Target rendering in the GUI
+
+The quality selector uses the connected printer's capabilities, including
+native PT-P710BT high quality. Printing consumes the exact anisotropic raster;
+preview and export use its square-pixel physical representation. Offline
+geometry uses the saved document DPI. Image properties expose optional logical
+width independently of source pixel dimensions.

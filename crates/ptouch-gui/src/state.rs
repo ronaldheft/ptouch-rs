@@ -5,8 +5,11 @@
 
 use std::sync::mpsc;
 
+use ptouch_core::device::DeviceFlags;
 use ptouch_core::protocol::PrintQuality;
 use ptouch_render::bitmap::LabelBitmap;
+use ptouch_render::document::LabelDocument;
+use ptouch_render::layout::ElementBounds;
 
 pub use ptouch_render::document::LabelElement;
 
@@ -34,7 +37,7 @@ pub enum PrinterResponse {
         media_type: String,
         max_px: u16,
         dpi: u16,
-        quality_modes: bool,
+        flags: DeviceFlags,
     },
     /// No printer found or previously connected printer lost.
     Disconnected,
@@ -56,6 +59,8 @@ pub struct AppState {
     pub tape_width_mm: u8,
     /// Current tape width in pixels (derived from tape_width_mm).
     pub tape_width_px: u32,
+    /// Resolution used by logical positions and dimensions in the document.
+    pub document_dpi: u16,
     /// Font name used for text rendering.
     pub font_name: String,
     /// Font top/bottom margin in pixels.
@@ -68,6 +73,10 @@ pub struct AppState {
     pub available_fonts: Vec<String>,
     /// The rendered preview bitmap (1-bit).
     pub preview_bitmap: Option<LabelBitmap>,
+    /// Exact raster to send to the printer.
+    pub printer_bitmap: Option<LabelBitmap>,
+    /// Final logical bounds returned by the renderer.
+    pub element_bounds: Vec<ElementBounds>,
     /// The preview texture uploaded to the GPU.
     pub preview_texture: Option<egui::TextureHandle>,
     /// Flag indicating the preview needs to be re-rendered.
@@ -98,8 +107,8 @@ pub struct AppState {
     /// Kept across disconnects so the canvas does not resize on a
     /// transient USB glitch.
     pub printer_dpi: u16,
-    /// Whether the last connected printer supports print quality modes.
-    pub printer_quality_modes: bool,
+    /// Capabilities of the last connected printer.
+    pub printer_flags: Option<DeviceFlags>,
     /// Selected print quality for the next print job.
     pub print_quality: PrintQuality,
     /// Channel sender for commands to the printer worker thread.
@@ -113,12 +122,16 @@ impl Default for AppState {
             selected_element: None,
             tape_width_mm: 12,
             tape_width_px: 76,
+            document_dpi: 180,
+
             font_name: "DejaVuSans".to_string(),
             font_margin: 0,
             overall_flip_h: false,
             overall_flip_v: false,
             available_fonts: Vec::new(),
             preview_bitmap: None,
+            printer_bitmap: None,
+            element_bounds: Vec::new(),
             preview_texture: None,
             needs_rerender: true,
             zoom: 1.0,
@@ -133,7 +146,7 @@ impl Default for AppState {
             operation_in_progress: false,
             printer_max_px: 0,
             printer_dpi: 180,
-            printer_quality_modes: false,
+            printer_flags: None,
             print_quality: PrintQuality::Standard,
             printer_cmd_tx: None,
         }
@@ -141,10 +154,46 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Convert the editor state into its serialized document model.
+    pub fn to_document(&self) -> LabelDocument {
+        LabelDocument {
+            version: 1,
+            tape_width_mm: self.tape_width_mm,
+            dpi: self.document_dpi,
+
+            font_name: self.font_name.clone(),
+            font_margin: self.font_margin,
+            flip_h: self.overall_flip_h,
+            flip_v: self.overall_flip_v,
+            elements: self.elements.clone(),
+        }
+    }
+
+    /// Replace editor fields with a loaded document.
+    pub fn apply_document(&mut self, document: LabelDocument) {
+        self.tape_width_mm = document.tape_width_mm;
+        self.document_dpi = document.dpi;
+        self.font_name = document.font_name;
+        self.font_margin = document.font_margin;
+        self.overall_flip_h = document.flip_h;
+        self.overall_flip_v = document.flip_v;
+        self.elements = document.elements;
+        self.selected_element = None;
+    }
+
+    /// Use the document's design resolution until a printer supplies geometry.
+    pub fn render_dpi(&self) -> u16 {
+        if self.printer_flags.is_some() {
+            self.printer_dpi
+        } else {
+            self.document_dpi
+        }
+    }
+
     /// Update the tape width in pixels based on the current tape_width_mm
     /// and the connected printer's resolution.
     pub fn update_tape_pixels(&mut self) {
-        if let Some(tape) = ptouch_core::tape::find_tape(self.tape_width_mm, self.printer_dpi) {
+        if let Some(tape) = ptouch_core::tape::find_tape(self.tape_width_mm, self.render_dpi()) {
             let px = u32::from(tape.pixels);
             self.tape_width_px = if self.printer_max_px > 0 {
                 px.min(u32::from(self.printer_max_px))
@@ -170,5 +219,23 @@ impl AppState {
                 Some(self.elements.len() - 1)
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn offline_tape_geometry_uses_document_resolution() {
+        let mut state = AppState {
+            tape_width_mm: 24,
+            document_dpi: 360,
+            ..AppState::default()
+        };
+        state.update_tape_pixels();
+        assert_eq!(state.tape_width_px, 320);
+        state.printer_flags = Some(DeviceFlags::FEED_HIRES);
+        state.update_tape_pixels();
+        assert_eq!(state.tape_width_px, 128);
     }
 }

@@ -5,7 +5,8 @@
 
 use log::info;
 
-use ptouch_core::protocol::PrintQuality;
+use ptouch_core::device::DeviceFlags;
+use ptouch_core::protocol::{PrintQuality, supports_print_quality};
 use ptouch_core::tape;
 
 use crate::state::{AppState, PrinterCommand};
@@ -52,7 +53,7 @@ fn show_tape_section(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading("Tape");
     ui.add_space(4.0);
 
-    let tapes = tape::supported_tapes(state.printer_dpi);
+    let tapes = tape::supported_tapes(state.render_dpi());
     let current_label = format!("{} mm ({} px)", state.tape_width_mm, state.tape_width_px);
 
     egui::ComboBox::from_label("Width")
@@ -82,12 +83,16 @@ fn show_print_options(ui: &mut egui::Ui, state: &mut AppState) {
         ui.add(crate::widgets::toggle(&mut state.auto_cut));
     });
 
-    if state.printer_quality_modes {
+    if state
+        .printer_flags
+        .is_some_and(|flags| flags.intersects(DeviceFlags::LEGACY_HIRES | DeviceFlags::FEED_HIRES))
+    {
         let quality_label = |q: PrintQuality| match q {
             PrintQuality::Standard => "Standard",
             PrintQuality::HighRes => "High resolution",
             PrintQuality::Draft => "Draft (high speed)",
         };
+        let previous = state.print_quality;
         egui::ComboBox::from_label("Quality")
             .selected_text(quality_label(state.print_quality))
             .show_ui(ui, |ui| {
@@ -95,10 +100,19 @@ fn show_print_options(ui: &mut egui::Ui, state: &mut AppState) {
                     PrintQuality::Standard,
                     PrintQuality::HighRes,
                     PrintQuality::Draft,
-                ] {
+                ]
+                .into_iter()
+                .filter(|quality| {
+                    state
+                        .printer_flags
+                        .is_some_and(|flags| supports_print_quality(flags, *quality))
+                }) {
                     ui.selectable_value(&mut state.print_quality, q, quality_label(q));
                 }
             });
+        if state.print_quality != previous {
+            state.mark_dirty();
+        }
     }
 }
 
