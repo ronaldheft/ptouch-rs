@@ -283,3 +283,45 @@ The MIT-licensed files are reusable on their own under the MIT license (see
 [LICENSE-MIT](LICENSE-MIT)). Any program that links `ptouch-core`, including the
 binaries in this repository, is covered by the GPLv3. See [NOTICE](NOTICE) for
 attribution details.
+
+## Positioned layouts
+
+Version 2 adds an opt-in `layout = "positioned"` mode. Text and image elements
+use `x` and `y` in pixels at the document DPI. Text requires an explicit
+`font_size` in points and uses the document font; image width and height can
+be set independently. Label length is the larger of `min_length` and the
+rightmost element plus `end_padding`.
+
+```toml
+version = 2
+tape_width_mm = 24
+dpi = 180
+layout = "positioned"
+min_length = 230
+end_padding = 3
+font_name = "sans-serif"
+font_margin = 0
+
+[[elements]]
+type = "text"
+content = "{{product}}"
+x = 10
+y = 12
+font_size = 7
+```
+
+The renderer rejects elements outside the actual printable height, without
+adding a workflow-specific safe margin. Elements may overlap. Positioned
+rotation, text-box alignment, cut marks and padding elements are not supported
+in this first implementation. Version 1 keeps the existing flow behavior.
+CLI layout and CSV output support positioning; the GUI refuses positioned
+files until the separate editor enhancement is installed, preventing lost
+coordinates. Typography, QR and native target rendering are independent PRs.
+
+Saved design coordinates are scaled to the connected printer's actual DPI at
+standard quality. This keeps physical positioning stable between 180- and
+360-dpi printers without requiring the separate native-feed enhancement.
+
+Rust API compatibility: the new public document/element fields require changes
+to downstream struct literals. PTL file compatibility is separate: existing
+version 1 flow files remain supported.

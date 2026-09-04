@@ -20,6 +20,8 @@ pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
         if ui.button("Add Text").clicked() {
             state.elements.push(LabelElement::Text {
                 content: "Label".to_string(),
+                x: None,
+                y: None,
                 font_size: None,
                 align: TextAlign::Left,
                 rotation: 0.0,
@@ -133,7 +135,10 @@ fn do_save_layout(state: &mut AppState) {
     }
 
     let document = LabelDocument {
-        version: ptouch_render::document::DOCUMENT_VERSION,
+        version: 1,
+        layout: ptouch_render::document::LayoutMode::Flow,
+        min_length: 0,
+        end_padding: 0,
         tape_width_mm: state.tape_width_mm,
         dpi: state.printer_dpi,
         font_name: state.font_name.clone(),
@@ -191,6 +196,11 @@ fn do_open_layout(state: &mut AppState) {
 
     match LabelDocument::from_toml_str(&text) {
         Ok(document) => {
+            if document.layout == ptouch_render::document::LayoutMode::Positioned {
+                state.status_message =
+                    "Positioned layouts require the positioning editor enhancement".into();
+                return;
+            }
             state.tape_width_mm = document.tape_width_mm;
             state.update_tape_pixels();
             state.font_name = document.font_name;

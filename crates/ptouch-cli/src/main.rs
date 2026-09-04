@@ -565,7 +565,11 @@ fn print_layout(args: &PrintArgs, layout_path: &str) -> Result<(), Box<dyn std::
     doc.apply_values(&values);
 
     let (print_width, max_px, mut device) = resolve_layout_target(args, &doc)?;
-    let bitmap = render_layout(&doc, print_width)?;
+    let bitmap = render_layout(
+        &doc,
+        print_width,
+        device.as_ref().map_or(doc.dpi, |dev| dev.device_info().dpi),
+    )?;
     emit_label(&bitmap, args, max_px, device.as_mut())?;
 
     if let Some(dev) = device {
@@ -613,7 +617,11 @@ fn print_layout_batch(
 
         let mut row_doc = doc.clone();
         row_doc.apply_values(&values);
-        let bitmap = render_layout(&row_doc, print_width)?;
+        let bitmap = render_layout(
+            &row_doc,
+            print_width,
+            device.as_ref().map_or(doc.dpi, |dev| dev.device_info().dpi),
+        )?;
 
         count += 1;
         if let Some(output) = &args.output {
@@ -657,7 +665,14 @@ fn build_row_values(
 fn render_layout(
     doc: &LabelDocument,
     print_width: u32,
+    dpi: u16,
 ) -> Result<LabelBitmap, Box<dyn std::error::Error>> {
+    if doc.layout == document::LayoutMode::Positioned {
+        return Ok(
+            ptouch_render::layout::render_positioned_document(doc, print_width, dpi)?
+                .printer_raster,
+        );
+    }
     let mut renderer = TextRenderer::new();
     let bitmap = document::render_elements(
         &doc.elements,

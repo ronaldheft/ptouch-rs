@@ -6,7 +6,10 @@
 //! Renders multi-line text into a [`LabelBitmap`] using system fonts.
 //! Supports auto-sizing, alignment, and font selection.
 
-use cosmic_text::{Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache};
+use cosmic_text::{
+    Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Weight,
+};
+use image::{GrayImage, Luma};
 use serde::{Deserialize, Serialize};
 
 use crate::RenderError;
@@ -14,10 +17,11 @@ use crate::Result;
 use crate::bitmap::LabelBitmap;
 
 /// Text alignment within the label.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TextAlign {
     /// Align text to the left edge.
+    #[default]
     Left,
     /// Center text horizontally.
     Center,
@@ -81,6 +85,58 @@ impl TextRenderer {
         font_margin: u32,
         align: TextAlign,
     ) -> Result<LabelBitmap> {
+        let gray = self.render_text_gray_to_height(
+            lines,
+            print_width,
+            font_name,
+            font_size,
+            font_margin,
+            align,
+            Weight::NORMAL.0,
+            true,
+        )?;
+        Ok(LabelBitmap::from_gray_image(&gray, 127))
+    }
+
+    /// Render tightly bounded grayscale text for positioned composition.
+    ///
+    /// The grayscale coverage is intentionally retained so callers can apply
+    /// anisotropic target geometry before converting to the printer's 1-bit
+    /// raster.
+    pub fn render_text_grayscale(
+        &mut self,
+        lines: &[&str],
+        font_name: &str,
+        font_size: f32,
+        font_weight: u16,
+    ) -> Result<GrayImage> {
+        let height = ((font_size * 1.2).ceil() * lines.len() as f32)
+            .ceil()
+            .max(1.0) as u32;
+        self.render_text_gray_to_height(
+            lines,
+            height,
+            font_name,
+            Some(font_size),
+            0,
+            TextAlign::Left,
+            font_weight,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_text_gray_to_height(
+        &mut self,
+        lines: &[&str],
+        print_width: u32,
+        font_name: &str,
+        font_size: Option<f32>,
+        font_margin: u32,
+        align: TextAlign,
+        font_weight: u16,
+        center_vertically: bool,
+    ) -> Result<GrayImage> {
         if print_width == 0 {
             return Err(RenderError::Text("print_width must be > 0".into()));
         }
@@ -115,7 +171,9 @@ impl TextRenderer {
         } else {
             Family::Name(font_name)
         };
-        let attrs = Attrs::new().family(family);
+        let attrs = Attrs::new()
+            .family(family)
+            .weight(Weight(font_weight.clamp(1, 1000)));
         let cosmic_align = Some(align.to_cosmic());
 
         // We do not know the final horizontal width yet. Use a large initial
@@ -147,11 +205,11 @@ impl TextRenderer {
         let bitmap_height = print_width;
         let x_offset = min_x.floor() as i32;
 
-        let mut bitmap = LabelBitmap::new(bitmap_width, bitmap_height);
+        let mut bitmap = GrayImage::from_pixel(bitmap_width, bitmap_height, Luma([255]));
 
         // Vertical centering offset
         let total_text_height = (num_lines * line_height) as u32;
-        let y_offset = if total_text_height < bitmap_height {
+        let y_offset = if center_vertically && total_text_height < bitmap_height {
             ((bitmap_height - total_text_height) / 2) as i32
         } else {
             font_margin as i32
@@ -165,17 +223,20 @@ impl TextRenderer {
             text_color,
             |x, y, w, h, color| {
                 let alpha = color.a();
-                if alpha < 128 {
-                    return;
-                }
                 let px = x - x_offset;
                 let py = y + y_offset;
                 for dy in 0..h as i32 {
                     for dx in 0..w as i32 {
                         let fx = px + dx;
                         let fy = py + dy;
-                        if fx >= 0 && fy >= 0 {
-                            bitmap.set_pixel(fx as u32, fy as u32, true);
+                        if fx >= 0
+                            && fy >= 0
+                            && (fx as u32) < bitmap_width
+                            && (fy as u32) < bitmap_height
+                        {
+                            let ink = 255u8.saturating_sub(alpha);
+                            let pixel = bitmap.get_pixel_mut(fx as u32, fy as u32);
+                            pixel.0[0] = pixel.0[0].min(ink);
                         }
                     }
                 }

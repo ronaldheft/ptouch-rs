@@ -37,6 +37,7 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
             rotation,
             flip_h,
             flip_v,
+            ..
         } => {
             changed |= show_text_properties(
                 ui,
@@ -59,6 +60,7 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
             target_height,
             flip_h,
             flip_v,
+            ..
         } => {
             changed |= show_image_properties(
                 ui,
