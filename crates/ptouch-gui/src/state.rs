@@ -165,7 +165,12 @@ impl AppState {
     /// Convert the editor state into its serialized document model.
     pub fn to_document(&self) -> LabelDocument {
         LabelDocument {
-            version: if self.layout == LayoutMode::Positioned {
+            version: if self.layout == LayoutMode::Positioned
+                || self
+                    .elements
+                    .iter()
+                    .any(|element| matches!(element, LabelElement::QrCode { .. }))
+            {
                 2
             } else {
                 1
@@ -307,6 +312,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn flow_qr_save_reopens_as_version_two() {
+        let text = "version = 2\ntape_width_mm = 24\nfont_name = \"sans-serif\"\nfont_margin = 0\n[[elements]]\ntype = \"qr\"\ncontent = \"HELLO\"\nsize = 58\n";
+        let mut state = AppState::default();
+        state.apply_document(LabelDocument::from_toml_str(text).unwrap());
+        let saved = state.to_document().to_toml_string().unwrap();
+        let reopened = LabelDocument::from_toml_str(&saved).unwrap();
+        assert_eq!(reopened.version, 2);
+        assert_eq!(reopened.layout, LayoutMode::Flow);
+        assert!(matches!(reopened.elements[0], LabelElement::QrCode { .. }));
+    }
     #[test]
     fn offline_tape_geometry_uses_document_resolution() {
         let mut state = AppState {

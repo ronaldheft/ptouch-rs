@@ -8,7 +8,7 @@ Rust tool for Brother P-Touch USB label printers. CLI and GUI.
 
 - Print text labels with custom font, size, alignment and rotation
 - Print images (PNG, JPEG, GIF, BMP, TIFF, WebP, SVG, and more)
-- Compose flow labels or position text and images at exact coordinates
+- Compose flow labels or position text, images, and semantic QR codes at exact coordinates
 - Save and reload designs as self-contained `.ptl` layout files (images
   embedded), then print them from the GUI or CLI
 - Template layouts with `{{name}}` placeholders and batch-print from a CSV
@@ -189,11 +189,31 @@ and exported previews compensate for the rectangular printer pixels so the
 physical proportions remain accurate.
 
 The full printer-reported printable height is available to positioned elements;
-there is no additional design safe margin. Text and image bounds are
+there is no additional design safe margin. Text, image, and QR bounds are
 converted from the document DPI to the target's cross-tape DPI and must fit
 within that actual raster. An element may end exactly at the printable edge,
 but rendering fails with a layout error if its bottom edge would be clipped.
 High-quality feed-axis scaling does not change this cross-tape limit.
+
+Version 2 layouts can generate QR codes directly from literal or templated
+content. `size` is the square logical-pixel canvas, including the required
+four-module quiet zone. Modules always use an integer number of pixels and are
+centered when the canvas has extra space. Error correction accepts `l`, `m`,
+`q`, or `h` and defaults to `m`. Set `min_module_size` when a printer or
+scanner requires more than the default one logical pixel per module.
+
+```toml
+[[elements]]
+type = "qr"
+content = "https://example.com/items/{{id}}"
+x = 0
+y = 0
+size = 128
+error_correction = "q"
+min_module_size = 2
+```
+
+Omit `x` and `y` to use a semantic QR code in a version 2 flow layout.
 
 ### Print options
 
