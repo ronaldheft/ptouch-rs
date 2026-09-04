@@ -308,3 +308,10 @@ pixels. Omitting the unit retains the existing flow font-size behavior.
 Omitting the family inherits the document font. Fonts still come from the
 system, so exact metrics depend on installed fonts. The core preserves these
 fields when the GUI opens and saves a layout; editing controls are separate.
+
+### Typography editor
+
+Text properties provide **Use document font**, an element font selector,
+weight and explicit size units. The existing document font remains editable
+as the inherited default. Untouched legacy text keeps its original sizing;
+choosing an explicit unit changes that element only.
