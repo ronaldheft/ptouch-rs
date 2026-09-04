@@ -308,3 +308,7 @@ pixels. Omitting the unit retains the existing flow font-size behavior.
 Omitting the family inherits the document font. Fonts still come from the
 system, so exact metrics depend on installed fonts. The core preserves these
 fields when the GUI opens and saves a layout; editing controls are separate.
+
+Rust API compatibility: Text variant fields require updates to downstream
+constructors or exhaustive matches. This is separate from existing PTL file
+compatibility; older flow files remain supported.
