@@ -850,6 +850,12 @@ fn print_to_device(
     max_px: u16,
     args: &PrintArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Native feed-resolution input requires the target-aware frontend.
+    if dev.flags().contains(DeviceFlags::FEED_HIRES)
+        && args.quality.to_print_quality() != PrintQuality::Standard
+    {
+        return Err(PtouchError::UnsupportedQuality(dev.device_info().name.to_string()).into());
+    }
     let raster_lines = raster::bitmap_to_raster_lines(bitmap, max_px);
 
     let total_copies = args.copies.max(1);

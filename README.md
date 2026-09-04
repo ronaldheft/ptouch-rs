@@ -283,3 +283,17 @@ The MIT-licensed files are reusable on their own under the MIT license (see
 [LICENSE-MIT](LICENSE-MIT)). Any program that links `ptouch-core`, including the
 binaries in this repository, is covered by the GPLv3. See [NOTICE](NOTICE) for
 attribution details.
+
+### Native feed-resolution API
+
+The PT-P710BT accepts caller-rendered raster lines at 360 dpi along the feed
+and 180 dpi across the tape. `FEED_HIRES` distinguishes this input contract
+from legacy printers, whose high-resolution lines are duplicated internally.
+The CLI continues to reject native high quality until its target-aware renderer
+is available. Standard printing and all legacy quality modes remain available.
+
+The Brother PT-E550W/PT-P750W/PT-P710BT raster reference documents the
+resolution on p. 13 and the advanced-mode bits on p. 33. Only PT-P710BT is
+opted in. Each job selects its quality and chain setting; its unused half-cut
+bit is left clear. Standard jobs explicitly reset the native high-resolution
+mode so they can follow high-quality jobs in the same session.
