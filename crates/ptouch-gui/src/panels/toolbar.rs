@@ -31,6 +31,17 @@ pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             info!("Added text element");
         }
 
+        if ui.button("Add QR").clicked() {
+            state.elements.push(LabelElement::QrCode {
+                content: "Label".into(),
+                size: state.tape_width_px,
+                error_correction: ptouch_render::document::QrErrorCorrection::Medium,
+                min_module_size: 1,
+            });
+            state.selected_element = Some(state.elements.len() - 1);
+            state.mark_dirty();
+        }
+
         if ui.button("Add Image").clicked()
             && let Some(path) = crate::widgets::image_file_dialog().pick_file()
         {

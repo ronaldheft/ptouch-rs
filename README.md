@@ -309,3 +309,10 @@ returns an error instead of squeezing the symbol. Error correction accepts
 This core change renders imported QR layouts in the GUI, but the QR editing
 controls are a separate contribution. Positioning and native target rendering
 are independent enhancements.
+
+### QR editor
+
+Use **Add QR** to create an editable element, or open a version 2 QR layout.
+The properties panel edits content, canvas size, minimum module size and error
+correction. Saving retains a version 2 document so QR layouts reopen safely.
+The default QR canvas matches the selected tape's printable height.
