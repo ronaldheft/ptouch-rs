@@ -241,7 +241,6 @@ fn show_text_properties(ui: &mut egui::Ui, props: TextProps, state: &mut AppStat
     ui.add_space(4.0);
 
     if state.layout == LayoutMode::Positioned {
-        *rotation = 0.0;
         changed |= show_flip_controls(ui, flip_h, flip_v);
         return changed;
     }
@@ -433,7 +432,6 @@ fn show_image_properties(ui: &mut egui::Ui, props: ImageProps, state: &mut AppSt
     ui.add_space(4.0);
 
     if state.layout == LayoutMode::Positioned {
-        *rotation = 0.0;
         changed |= show_flip_controls(ui, flip_h, flip_v);
         return changed;
     }

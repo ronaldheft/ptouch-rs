@@ -64,6 +64,7 @@ impl PtouchApp {
             match ptouch_render::layout::render_positioned_document(
                 &self.state.to_document(),
                 self.state.tape_width_px,
+                self.state.render_dpi(),
             ) {
                 Ok(rendered) => {
                     self.state.element_bounds = rendered.element_bounds;

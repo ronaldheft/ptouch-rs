@@ -318,6 +318,14 @@ CLI layout and CSV output support positioning; the GUI refuses positioned
 files until the separate editor enhancement is installed, preventing lost
 coordinates. Typography, QR and native target rendering are independent PRs.
 
+Saved design coordinates are scaled to the connected printer's actual DPI at
+standard quality. This keeps physical positioning stable between 180- and
+360-dpi printers without requiring the separate native-feed enhancement.
+
+Rust API compatibility: the new public document/element fields require changes
+to downstream struct literals. PTL file compatibility is separate: existing
+version 1 flow files remain supported.
+
 ### Positioning editor
 
 Choose Flow or Positioned layout, then edit numeric X/Y coordinates, image

@@ -238,19 +238,13 @@ fn show_layout_section(ui: &mut egui::Ui, state: &mut AppState) {
         })
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut state.layout, LayoutMode::Flow, "Flow");
-            let has_flow_only = state.elements.iter().any(|element| {
-                matches!(
-                    element,
-                    crate::state::LabelElement::CutMark
-                        | crate::state::LabelElement::Padding { .. }
-                )
-            });
-            ui.add_enabled_ui(!has_flow_only, |ui| {
+            let can_position = state.can_use_positioned_layout();
+            ui.add_enabled_ui(can_position, |ui| {
                 ui.selectable_value(&mut state.layout, LayoutMode::Positioned, "Positioned");
             })
             .response
             .on_disabled_hover_text(
-                "Remove cut marks and padding before switching to positioned layout.",
+                "Remove cut marks and padding, and clear rotations before switching to positioned layout.",
             );
         });
     if state.layout != previous {
@@ -258,28 +252,21 @@ fn show_layout_section(ui: &mut egui::Ui, state: &mut AppState) {
             for element in &mut state.elements {
                 match element {
                     crate::state::LabelElement::Text {
-                        x,
-                        y,
-                        font_size,
-                        rotation,
-                        ..
+                        x, y, font_size, ..
                     } => {
                         x.get_or_insert(0);
                         y.get_or_insert(0);
                         font_size.get_or_insert(12.0);
-                        *rotation = 0.0;
                     }
                     crate::state::LabelElement::Image {
                         x,
                         y,
                         target_height,
-                        rotation,
                         ..
                     } => {
                         x.get_or_insert(0);
                         y.get_or_insert(0);
                         target_height.get_or_insert(state.tape_width_px);
-                        *rotation = 0.0;
                     }
                     crate::state::LabelElement::CutMark
                     | crate::state::LabelElement::Padding { .. } => {}

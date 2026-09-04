@@ -154,6 +154,17 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Switching layout modes must not discard flow-only elements or rotations.
+    pub fn can_use_positioned_layout(&self) -> bool {
+        self.elements.iter().all(|element| match element {
+            LabelElement::Text { rotation, .. } | LabelElement::Image { rotation, .. } => {
+                let angle = rotation.rem_euclid(360.0);
+                angle < 0.5 || (360.0 - angle) < 0.5
+            }
+            LabelElement::CutMark | LabelElement::Padding { .. } => false,
+        })
+    }
+
     /// Convert the editor state into its serialized document model.
     pub fn to_document(&self) -> LabelDocument {
         LabelDocument {
@@ -251,5 +262,27 @@ mod tests {
                 ..
             }
         ));
+    }
+    #[test]
+    fn switching_layout_mode_does_not_discard_rotated_content() {
+        let mut state = AppState::default();
+        state.elements.push(LabelElement::Text {
+            content: "Rotated".into(),
+            x: None,
+            y: None,
+            font_size: Some(12.0),
+            align: ptouch_render::text::TextAlign::Left,
+            rotation: 90.0,
+            flip_h: false,
+            flip_v: false,
+        });
+        assert!(!state.can_use_positioned_layout());
+        assert!(matches!(
+            &state.elements[0],
+            LabelElement::Text { rotation: 90.0, .. }
+        ));
+        state.elements.clear();
+        state.elements.push(LabelElement::CutMark);
+        assert!(!state.can_use_positioned_layout());
     }
 }
