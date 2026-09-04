@@ -659,11 +659,12 @@ fn render_layout(
     print_width: u32,
 ) -> Result<LabelBitmap, Box<dyn std::error::Error>> {
     let mut renderer = TextRenderer::new();
-    let bitmap = document::render_elements(
+    let bitmap = document::render_elements_at_dpi(
         &doc.elements,
         print_width,
         &doc.font_name,
         doc.font_margin,
+        doc.dpi,
         &mut renderer,
     )?
     .ok_or_else(|| PtouchError::SendFailed("layout produced no output".to_string()))?;

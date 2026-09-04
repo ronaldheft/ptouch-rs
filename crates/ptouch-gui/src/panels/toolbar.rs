@@ -21,6 +21,9 @@ pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             state.elements.push(LabelElement::Text {
                 content: "Label".to_string(),
                 font_size: None,
+                font_name: None,
+                font_weight: None,
+                font_size_unit: None,
                 align: TextAlign::Left,
                 rotation: 0.0,
                 flip_h: false,
@@ -135,7 +138,7 @@ fn do_save_layout(state: &mut AppState) {
     let document = LabelDocument {
         version: ptouch_render::document::DOCUMENT_VERSION,
         tape_width_mm: state.tape_width_mm,
-        dpi: state.printer_dpi,
+        dpi: state.layout_dpi,
         font_name: state.font_name.clone(),
         font_margin: state.font_margin,
         flip_h: state.overall_flip_h,
@@ -191,6 +194,7 @@ fn do_open_layout(state: &mut AppState) {
 
     match LabelDocument::from_toml_str(&text) {
         Ok(document) => {
+            state.layout_dpi = document.dpi;
             state.tape_width_mm = document.tape_width_mm;
             state.update_tape_pixels();
             state.font_name = document.font_name;

@@ -58,6 +58,8 @@ pub struct AppState {
     pub tape_width_px: u32,
     /// Font name used for text rendering.
     pub font_name: String,
+    /// DPI used to resolve explicit point-sized text in the document.
+    pub layout_dpi: u16,
     /// Font top/bottom margin in pixels.
     pub font_margin: u32,
     /// Mirror the whole composed label left-right (horizontal).
@@ -114,6 +116,7 @@ impl Default for AppState {
             tape_width_mm: 12,
             tape_width_px: 76,
             font_name: "DejaVuSans".to_string(),
+            layout_dpi: 180,
             font_margin: 0,
             overall_flip_h: false,
             overall_flip_v: false,

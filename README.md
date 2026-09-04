@@ -283,3 +283,32 @@ The MIT-licensed files are reusable on their own under the MIT license (see
 [LICENSE-MIT](LICENSE-MIT)). Any program that links `ptouch-core`, including the
 binaries in this repository, is covered by the GPLv3. See [NOTICE](NOTICE) for
 attribution details.
+
+## Per-element typography
+
+Text elements can override the document's family and choose an independent
+CSS-style weight (1–1000, regular 400 by default). This lets an editable label
+distinguish its product name, identifier and supporting text without rendering
+an external bitmap. These options work in the existing flow layout.
+
+```toml
+[[elements]]
+type = "text"
+content = "{{product}}"
+font_name = "Inter"
+font_weight = 700
+font_size = 7
+font_size_unit = "pt"
+align = "left"
+rotation = 0.0
+```
+
+An explicit `pt` unit resolves at the document's `dpi`; `px` uses logical
+pixels. Omitting the unit retains the existing flow font-size behavior.
+Omitting the family inherits the document font. Fonts still come from the
+system, so exact metrics depend on installed fonts. The core preserves these
+fields when the GUI opens and saves a layout; editing controls are separate.
+
+Rust API compatibility: Text variant fields require updates to downstream
+constructors or exhaustive matches. This is separate from existing PTL file
+compatibility; older flow files remain supported.
