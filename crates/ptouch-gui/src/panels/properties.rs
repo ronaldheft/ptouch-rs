@@ -7,6 +7,7 @@ use log::{error, info};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
+use ptouch_render::document::LayoutMode;
 use ptouch_render::image_loader;
 use ptouch_render::text::TextAlign;
 
@@ -31,6 +32,8 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
 
     match &mut element {
         LabelElement::Text {
+            x,
+            y,
             content,
             font_size,
             align,
@@ -39,6 +42,9 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
             flip_v,
             ..
         } => {
+            if state.layout == LayoutMode::Positioned {
+                changed |= show_position(ui, x, y);
+            }
             changed |= show_text_properties(
                 ui,
                 TextProps {
@@ -53,6 +59,9 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
             );
         }
         LabelElement::Image {
+            x,
+            y,
+            target_width,
             path,
             image_data,
             bitmap,
@@ -62,6 +71,10 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
             flip_v,
             ..
         } => {
+            if state.layout == LayoutMode::Positioned {
+                changed |= show_position(ui, x, y);
+            }
+            changed |= show_logical_width(ui, target_width);
             changed |= show_image_properties(
                 ui,
                 ImageProps {
@@ -186,7 +199,7 @@ fn show_text_properties(ui: &mut egui::Ui, props: TextProps, state: &mut AppStat
 
     // Font size
     let mut use_auto = font_size.is_none();
-    if ui.checkbox(&mut use_auto, "Auto font size").changed() {
+    if state.layout == LayoutMode::Flow && ui.checkbox(&mut use_auto, "Auto font size").changed() {
         if use_auto {
             *font_size = None;
         } else {
@@ -226,6 +239,12 @@ fn show_text_properties(ui: &mut egui::Ui, props: TextProps, state: &mut AppStat
     });
 
     ui.add_space(4.0);
+
+    if state.layout == LayoutMode::Positioned {
+        *rotation = 0.0;
+        changed |= show_flip_controls(ui, flip_h, flip_v);
+        return changed;
+    }
 
     // Alignment
     ui.label("Alignment:");
@@ -413,6 +432,11 @@ fn show_image_properties(ui: &mut egui::Ui, props: ImageProps, state: &mut AppSt
 
     ui.add_space(4.0);
 
+    if state.layout == LayoutMode::Positioned {
+        *rotation = 0.0;
+        changed |= show_flip_controls(ui, flip_h, flip_v);
+        return changed;
+    }
     // Rotation
     ui.label("Rotation:");
     ui.horizontal(|ui| {
@@ -496,5 +520,41 @@ fn show_padding_properties(ui: &mut egui::Ui, pixels: &mut u32) -> bool {
         }
     });
 
+    changed
+}
+
+fn show_position(ui: &mut egui::Ui, x: &mut Option<u32>, y: &mut Option<u32>) -> bool {
+    let mut changed = x.is_none() || y.is_none();
+    let x = x.get_or_insert(0);
+    let y = y.get_or_insert(0);
+    ui.horizontal(|ui| {
+        ui.label("X:");
+        changed |= ui.add(egui::DragValue::new(x).range(0..=100_000)).changed();
+        ui.label("Y:");
+        changed |= ui.add(egui::DragValue::new(y).range(0..=100_000)).changed();
+        ui.label("px");
+    });
+    changed
+}
+
+fn show_logical_width(ui: &mut egui::Ui, width: &mut Option<u32>) -> bool {
+    let mut changed = false;
+    let mut automatic = width.is_none();
+    if ui
+        .checkbox(&mut automatic, "Automatic image width")
+        .changed()
+    {
+        *width = if automatic { None } else { Some(128) };
+        changed = true;
+    }
+    if let Some(width) = width {
+        ui.horizontal(|ui| {
+            ui.label("Logical width:");
+            changed |= ui
+                .add(egui::DragValue::new(width).range(1..=100_000))
+                .changed();
+            ui.label("px");
+        });
+    }
     changed
 }

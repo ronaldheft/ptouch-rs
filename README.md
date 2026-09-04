@@ -317,3 +317,12 @@ in this first implementation. Version 1 keeps the existing flow behavior.
 CLI layout and CSV output support positioning; the GUI refuses positioned
 files until the separate editor enhancement is installed, preventing lost
 coordinates. Typography, QR and native target rendering are independent PRs.
+
+### Positioning editor
+
+Choose Flow or Positioned layout, then edit numeric X/Y coordinates, image
+width, minimum length and end padding. Existing text size and document font
+controls remain available. Positioned mode hides unsupported rotation and
+alignment controls and requires cut marks/padding to be removed before
+switching. Save/Open retain the complete positioning document. Dragging,
+resize handles, snapping and text-box alignment are deferred.
