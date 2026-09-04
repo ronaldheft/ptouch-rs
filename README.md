@@ -301,3 +301,7 @@ An image's optional `target_width` specifies logical placement independently
 of source sampling: a 466×128 source placed at 233×128 logical dots retains
 all feed samples in high-quality mode. Without a width, existing automatic
 image sizing remains unchanged. The GUI controls are a separate contribution.
+
+Rust API compatibility: Image variant fields require updates to downstream
+constructors or exhaustive matches. This is separate from existing PTL file
+compatibility; older flow files remain supported.
