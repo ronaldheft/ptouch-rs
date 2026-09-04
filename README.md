@@ -301,3 +301,11 @@ An image's optional `target_width` specifies logical placement independently
 of source sampling: a 466×128 source placed at 233×128 logical dots retains
 all feed samples in high-quality mode. Without a width, existing automatic
 image sizing remains unchanged. The GUI controls are a separate contribution.
+
+### Target rendering in the GUI
+
+The quality selector uses the connected printer's capabilities, including
+native PT-P710BT high quality. Printing consumes the exact anisotropic raster;
+preview and export use its square-pixel physical representation. Offline
+geometry uses the saved document DPI. Image properties expose optional logical
+width independently of source pixel dimensions.

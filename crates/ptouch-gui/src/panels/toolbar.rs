@@ -77,12 +77,12 @@ pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
         // -- Action buttons --
         let connected = state.printer_connected;
         let busy = state.operation_in_progress;
-        let has_bitmap = state.preview_bitmap.is_some();
+        let has_bitmap = state.printer_bitmap.is_some();
 
         if ui
             .add_enabled(connected && !busy && has_bitmap, egui::Button::new("Print"))
             .clicked()
-            && let Some(ref bitmap) = state.preview_bitmap
+            && let Some(ref bitmap) = state.printer_bitmap
         {
             let raster_lines = raster::bitmap_to_raster_lines(bitmap, state.printer_max_px);
             let chain_print = !state.auto_cut;
@@ -132,16 +132,7 @@ fn do_save_layout(state: &mut AppState) {
         return;
     }
 
-    let document = LabelDocument {
-        version: ptouch_render::document::DOCUMENT_VERSION,
-        tape_width_mm: state.tape_width_mm,
-        dpi: state.printer_dpi,
-        font_name: state.font_name.clone(),
-        font_margin: state.font_margin,
-        flip_h: state.overall_flip_h,
-        flip_v: state.overall_flip_v,
-        elements: state.elements.clone(),
-    };
+    let document = state.to_document();
 
     let text = match document.to_toml_string() {
         Ok(text) => text,
@@ -191,14 +182,8 @@ fn do_open_layout(state: &mut AppState) {
 
     match LabelDocument::from_toml_str(&text) {
         Ok(document) => {
-            state.tape_width_mm = document.tape_width_mm;
+            state.apply_document(document);
             state.update_tape_pixels();
-            state.font_name = document.font_name;
-            state.font_margin = document.font_margin;
-            state.overall_flip_h = document.flip_h;
-            state.overall_flip_v = document.flip_v;
-            state.elements = document.elements;
-            state.selected_element = None;
             state.mark_dirty();
             state.status_message = format!("Opened {}", path.display());
             info!("Opened layout: {}", path.display());
