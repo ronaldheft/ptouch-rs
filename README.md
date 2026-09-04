@@ -144,7 +144,7 @@ cat people.csv | ptouch print --layout badge.ptl --csv - --set dept=Eng
 ### Positioned layouts
 
 Version 1 `.ptl` files keep their existing left-to-right `flow` behavior.
-Version 2 adds `layout = "positioned"` in the CLI renderer, where coordinates and dimensions are
+Version 2 adds `layout = "positioned"`, where coordinates and dimensions are
 logical pixels at the document `dpi`. Each text element can override the
 document font family and select its own weight, size, and size unit (`pt` or
 `px`). The final tape length is the larger of `min_length` and the rightmost
@@ -180,9 +180,6 @@ font_weight = 300
 font_size = 8
 font_size_unit = "pt"
 ```
-
-GUI editing of version 2 documents is a separate follow-up; this version of
-the GUI continues to save version 1 flow documents and rejects version 2 input.
 
 Positioned images use `x`, `y`, `target_width`, and `target_height`; images
 saved by the GUI remain embedded in the layout. On the PT-P710BT, high quality
