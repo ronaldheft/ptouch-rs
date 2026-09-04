@@ -658,6 +658,11 @@ fn render_layout(
     doc: &LabelDocument,
     print_width: u32,
 ) -> Result<LabelBitmap, Box<dyn std::error::Error>> {
+    if doc.layout == document::LayoutMode::Positioned {
+        return Ok(
+            ptouch_render::layout::render_positioned_document(doc, print_width)?.printer_raster,
+        );
+    }
     let mut renderer = TextRenderer::new();
     let bitmap = document::render_elements(
         &doc.elements,
