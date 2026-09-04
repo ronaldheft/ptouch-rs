@@ -215,18 +215,6 @@ min_module_size = 2
 
 Omit `x` and `y` to use a semantic QR code in a version 2 flow layout.
 
-To reproduce a decoded source symbol exactly, add a `source` inline table with
-its base64 data codewords, QR Model 2 version, and mask pattern. The declared
-`error_correction` must match the source. With `source` present, the codewords
-are authoritative and `content` describes the decoded payload. The GUI locks
-content and correction until **Use content encoding instead** is selected.
-Template substitution that changes the payload clears the source metadata. When `source` is absent, `content`
-continues to use automatic encoding and mask selection.
-
-```toml
-source = { data_codewords_base64 = "QFSEVMTE8OwR7BHsEewR7BHsEQ==", version = 1, mask_pattern = 7 }
-```
-
 ### Print options
 
 | Flag | Long | Description |

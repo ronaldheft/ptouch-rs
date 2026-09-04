@@ -99,7 +99,6 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
             y,
             size,
             error_correction,
-            source,
             min_module_size,
         } => {
             changed |= show_qr_properties(
@@ -110,7 +109,6 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
                     y,
                     size,
                     error_correction,
-                    source,
                     min_module_size,
                 },
                 state,
@@ -148,14 +146,12 @@ fn show_qr_properties(ui: &mut egui::Ui, props: QrProps, state: &AppState) -> bo
         y,
         size,
         error_correction,
-        source,
         min_module_size,
     } = props;
     let mut changed = false;
     ui.label("QR Content:");
     changed |= ui
-        .add_enabled(
-            source.is_none(),
+        .add(
             egui::TextEdit::multiline(content)
                 .desired_width(f32::INFINITY)
                 .desired_rows(3),
@@ -187,32 +183,22 @@ fn show_qr_properties(ui: &mut egui::Ui, props: QrProps, state: &AppState) -> bo
         ui.label("px");
     });
 
-    ui.add_enabled_ui(source.is_none(), |ui| {
-        egui::ComboBox::from_label("Error correction")
-            .selected_text(error_correction.as_str().to_uppercase())
-            .show_ui(ui, |ui| {
-                changed |= ui
-                    .selectable_value(error_correction, QrErrorCorrection::Low, "L")
-                    .changed();
-                changed |= ui
-                    .selectable_value(error_correction, QrErrorCorrection::Medium, "M")
-                    .changed();
-                changed |= ui
-                    .selectable_value(error_correction, QrErrorCorrection::Quartile, "Q")
-                    .changed();
-                changed |= ui
-                    .selectable_value(error_correction, QrErrorCorrection::High, "H")
-                    .changed();
-            });
-    });
-    if source.is_some() {
-        ui.add_space(4.0);
-        ui.label("This QR preserves a decoded source symbol's codewords, version, and mask.");
-        if ui.button("Use content encoding instead").clicked() {
-            *source = None;
-            changed = true;
-        }
-    }
+    egui::ComboBox::from_label("Error correction")
+        .selected_text(error_correction.as_str().to_uppercase())
+        .show_ui(ui, |ui| {
+            changed |= ui
+                .selectable_value(error_correction, QrErrorCorrection::Low, "L")
+                .changed();
+            changed |= ui
+                .selectable_value(error_correction, QrErrorCorrection::Medium, "M")
+                .changed();
+            changed |= ui
+                .selectable_value(error_correction, QrErrorCorrection::Quartile, "Q")
+                .changed();
+            changed |= ui
+                .selectable_value(error_correction, QrErrorCorrection::High, "H")
+                .changed();
+        });
     changed
 }
 
@@ -223,7 +209,6 @@ struct QrProps<'a> {
     y: &'a mut Option<u32>,
     size: &'a mut u32,
     error_correction: &'a mut QrErrorCorrection,
-    source: &'a mut Option<ptouch_render::document::QrSource>,
     min_module_size: &'a mut u32,
 }
 
