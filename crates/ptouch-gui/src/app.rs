@@ -60,25 +60,41 @@ impl PtouchApp {
             return;
         }
 
-        let result = match ptouch_render::document::render_elements(
-            &self.state.elements,
-            self.state.tape_width_px,
-            &self.state.font_name,
-            self.state.font_margin,
-            &mut self.renderer,
-        ) {
-            Ok(result) => result,
-            Err(e) => {
-                error!("Render failed: {}", e);
-                self.state.status_message = format!("Render error: {}", e);
-                None
+        let result = if self.state.layout == ptouch_render::document::LayoutMode::Positioned {
+            match ptouch_render::layout::render_positioned_document(
+                &self.state.to_document(),
+                self.state.tape_width_px,
+                self.state.render_dpi(),
+            ) {
+                Ok(rendered) => {
+                    self.state.element_bounds = rendered.element_bounds;
+                    Some(rendered.printer_raster)
+                }
+                Err(error) => {
+                    error!("Render failed: {error}");
+                    self.state.status_message = format!("Render error: {error}");
+                    None
+                }
+            }
+        } else {
+            self.state.element_bounds.clear();
+            match ptouch_render::document::render_elements(
+                &self.state.elements,
+                self.state.tape_width_px,
+                &self.state.font_name,
+                self.state.font_margin,
+                &mut self.renderer,
+            ) {
+                Ok(result) => result.map(|bitmap| {
+                    bitmap.mirrored(self.state.overall_flip_h, self.state.overall_flip_v)
+                }),
+                Err(error) => {
+                    error!("Render failed: {error}");
+                    self.state.status_message = format!("Render error: {error}");
+                    None
+                }
             }
         };
-
-        // Whole-label mirroring is applied once, after the elements are
-        // composed, independently of any per-element flips.
-        let result =
-            result.map(|bmp| bmp.mirrored(self.state.overall_flip_h, self.state.overall_flip_v));
 
         if let Some(ref bitmap) = result {
             let rgba = bitmap.to_rgba_image();

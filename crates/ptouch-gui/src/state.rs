@@ -7,6 +7,8 @@ use std::sync::mpsc;
 
 use ptouch_core::protocol::PrintQuality;
 use ptouch_render::bitmap::LabelBitmap;
+use ptouch_render::document::{LabelDocument, LayoutMode};
+use ptouch_render::layout::ElementBounds;
 
 pub use ptouch_render::document::LabelElement;
 
@@ -58,6 +60,12 @@ pub struct AppState {
     pub tape_width_px: u32,
     /// Font name used for text rendering.
     pub font_name: String,
+    /// Resolution used by the saved layout coordinates.
+    pub document_dpi: u16,
+    pub layout: LayoutMode,
+    pub min_length: u32,
+    pub end_padding: u32,
+    pub element_bounds: Vec<ElementBounds>,
     /// Font top/bottom margin in pixels.
     pub font_margin: u32,
     /// Mirror the whole composed label left-right (horizontal).
@@ -114,6 +122,11 @@ impl Default for AppState {
             tape_width_mm: 12,
             tape_width_px: 76,
             font_name: "DejaVuSans".to_string(),
+            document_dpi: 180,
+            layout: LayoutMode::Flow,
+            min_length: 0,
+            end_padding: 0,
+            element_bounds: Vec::new(),
             font_margin: 0,
             overall_flip_h: false,
             overall_flip_v: false,
@@ -141,10 +154,66 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Switching layout modes must not discard flow-only elements or rotations.
+    pub fn can_use_positioned_layout(&self) -> bool {
+        self.elements.iter().all(|element| match element {
+            LabelElement::Text { rotation, .. } | LabelElement::Image { rotation, .. } => {
+                let angle = rotation.rem_euclid(360.0);
+                angle < 0.5 || (360.0 - angle) < 0.5
+            }
+            LabelElement::CutMark | LabelElement::Padding { .. } => false,
+        })
+    }
+
+    /// Convert the editor state into its serialized document model.
+    pub fn to_document(&self) -> LabelDocument {
+        LabelDocument {
+            version: if self.layout == LayoutMode::Positioned {
+                2
+            } else {
+                1
+            },
+            tape_width_mm: self.tape_width_mm,
+            dpi: self.document_dpi,
+            layout: self.layout,
+            min_length: self.min_length,
+            end_padding: self.end_padding,
+            font_name: self.font_name.clone(),
+            font_margin: self.font_margin,
+            flip_h: self.overall_flip_h,
+            flip_v: self.overall_flip_v,
+            elements: self.elements.clone(),
+        }
+    }
+
+    /// Replace editor fields with a loaded document.
+    pub fn apply_document(&mut self, document: LabelDocument) {
+        self.tape_width_mm = document.tape_width_mm;
+        self.document_dpi = document.dpi;
+        self.layout = document.layout;
+        self.min_length = document.min_length;
+        self.end_padding = document.end_padding;
+        self.font_name = document.font_name;
+        self.font_margin = document.font_margin;
+        self.overall_flip_h = document.flip_h;
+        self.overall_flip_v = document.flip_v;
+        self.elements = document.elements;
+        self.selected_element = None;
+    }
+
+    /// Use the document's design resolution until a printer supplies geometry.
+    pub fn render_dpi(&self) -> u16 {
+        if self.printer_connected {
+            self.printer_dpi
+        } else {
+            self.document_dpi
+        }
+    }
+
     /// Update the tape width in pixels based on the current tape_width_mm
     /// and the connected printer's resolution.
     pub fn update_tape_pixels(&mut self) {
-        if let Some(tape) = ptouch_core::tape::find_tape(self.tape_width_mm, self.printer_dpi) {
+        if let Some(tape) = ptouch_core::tape::find_tape(self.tape_width_mm, self.render_dpi()) {
             let px = u32::from(tape.pixels);
             self.tape_width_px = if self.printer_max_px > 0 {
                 px.min(u32::from(self.printer_max_px))
@@ -170,5 +239,50 @@ impl AppState {
                 Some(self.elements.len() - 1)
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn positioned_editor_roundtrip_retains_coordinates_and_dimensions() {
+        let doc = LabelDocument::from_toml_str("version = 2\ntape_width_mm = 24\ndpi = 180\nlayout = \"positioned\"\nmin_length = 230\nend_padding = 3\nfont_name = \"sans-serif\"\nfont_margin = 0\n[[elements]]\ntype = \"text\"\ncontent = \"Sample\"\nx = 141\ny = 12\nfont_size = 7\n").unwrap();
+        let mut state = AppState::default();
+        state.apply_document(doc);
+        let saved = state.to_document();
+        let reopened = LabelDocument::from_toml_str(&saved.to_toml_string().unwrap()).unwrap();
+        assert_eq!(reopened.layout, LayoutMode::Positioned);
+        assert_eq!((reopened.min_length, reopened.end_padding), (230, 3));
+        assert!(matches!(
+            &reopened.elements[0],
+            LabelElement::Text {
+                x: Some(141),
+                y: Some(12),
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn switching_layout_mode_does_not_discard_rotated_content() {
+        let mut state = AppState::default();
+        state.elements.push(LabelElement::Text {
+            content: "Rotated".into(),
+            x: None,
+            y: None,
+            font_size: Some(12.0),
+            align: ptouch_render::text::TextAlign::Left,
+            rotation: 90.0,
+            flip_h: false,
+            flip_v: false,
+        });
+        assert!(!state.can_use_positioned_layout());
+        assert!(matches!(
+            &state.elements[0],
+            LabelElement::Text { rotation: 90.0, .. }
+        ));
+        state.elements.clear();
+        state.elements.push(LabelElement::CutMark);
+        assert!(!state.can_use_positioned_layout());
     }
 }

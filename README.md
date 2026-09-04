@@ -325,3 +325,12 @@ standard quality. This keeps physical positioning stable between 180- and
 Rust API compatibility: the new public document/element fields require changes
 to downstream struct literals. PTL file compatibility is separate: existing
 version 1 flow files remain supported.
+
+### Positioning editor
+
+Choose Flow or Positioned layout, then edit numeric X/Y coordinates, image
+width, minimum length and end padding. Existing text size and document font
+controls remain available. Positioned mode hides unsupported rotation and
+alignment controls and requires cut marks/padding to be removed before
+switching. Save/Open retain the complete positioning document. Dragging,
+resize handles, snapping and text-box alignment are deferred.
