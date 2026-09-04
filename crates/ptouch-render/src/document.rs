@@ -91,6 +91,7 @@ pub struct LabelDocument {
 impl LabelDocument {
     /// Serialize the document to a TOML string.
     pub fn to_toml_string(&self) -> Result<String> {
+        self.validate_version()?;
         Ok(toml::to_string(self)?)
     }
 
@@ -897,7 +898,8 @@ mod tests {
             flip_v: false,
             elements: vec![LabelElement::CutMark],
         };
-        let text = doc.to_toml_string().unwrap();
+        assert!(doc.to_toml_string().is_err());
+        let text = toml::to_string(&doc).unwrap();
         assert!(LabelDocument::from_toml_str(&text).is_err());
     }
 

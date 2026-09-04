@@ -10,6 +10,14 @@ use crate::document::{LabelDocument, LabelElement, LayoutMode};
 use crate::text::TextRenderer;
 use crate::{RenderError, Result};
 
+// Positioned layout maps design pixels to a standard-resolution printer.
+// Native feed density and print-quality policy belong to target rendering.
+struct StandardTarget {
+    tape_width_px: u32,
+    cross_dpi: u16,
+    feed_dpi: u16,
+}
+
 /// Rectangle in logical document pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ElementBounds {
@@ -58,9 +66,15 @@ enum PositionedElement {
 pub fn render_positioned_document(
     document: &LabelDocument,
     tape_width_px: u32,
+    dpi: u16,
 ) -> Result<RenderedLabel> {
+    let target = StandardTarget {
+        tape_width_px,
+        cross_dpi: dpi,
+        feed_dpi: dpi,
+    };
     document.validate_version()?;
-    if document.dpi == 0 {
+    if document.dpi == 0 || target.cross_dpi == 0 || target.feed_dpi == 0 {
         return Err(RenderError::Layout(
             "document and target resolutions must be greater than zero".to_string(),
         ));
@@ -69,7 +83,7 @@ pub fn render_positioned_document(
         return Err(RenderError::Layout("expected a positioned document".into()));
     }
 
-    let logical_height = tape_width_px;
+    let logical_height = scale(target.tape_width_px, target.cross_dpi, document.dpi);
     let mut bounds = Vec::with_capacity(document.elements.len());
     let mut positioned = Vec::with_capacity(document.elements.len());
     let mut right_edge = 0;
@@ -175,8 +189,13 @@ pub fn render_positioned_document(
             LabelElement::Text { .. } => "text",
             LabelElement::CutMark | LabelElement::Padding { .. } => unreachable!(),
         };
-        let (raster_bounds, element_right_edge) =
-            positioned_raster_bounds(element_bounds, tape_width_px, element_index, element_kind)?;
+        let (raster_bounds, element_right_edge) = positioned_raster_bounds(
+            element_bounds,
+            document.dpi,
+            &target,
+            element_index,
+            element_kind,
+        )?;
         right_edge = right_edge.max(element_right_edge);
         bounds.push(element_bounds);
         positioned.push((rendered, raster_bounds));
@@ -186,7 +205,10 @@ pub fn render_positioned_document(
         .checked_add(document.end_padding)
         .ok_or_else(|| RenderError::Layout("positioned label length is too large".to_string()))?;
     let logical_width = document.min_length.max(padded_right_edge);
-    let mut printer_raster = LabelBitmap::new(logical_width, tape_width_px);
+    let mut printer_raster = LabelBitmap::new(
+        scale_positioned_edge(logical_width, document.dpi, target.feed_dpi)?,
+        target.tape_width_px,
+    );
     for (element, raster_bounds) in positioned {
         let (image, bounds) = match element {
             PositionedElement::Image {
@@ -248,25 +270,57 @@ fn required_coordinate(value: Option<u32>, element: &str, axis: &str) -> Result<
 /// boundary after rounding.
 fn positioned_raster_bounds(
     bounds: ElementBounds,
-    tape_width_px: u32,
-    index: usize,
-    kind: &str,
+    document_dpi: u16,
+    target: &StandardTarget,
+    element_index: usize,
+    element_kind: &str,
 ) -> Result<(ElementBounds, u32)> {
-    let right = bounds
-        .x
-        .checked_add(bounds.width)
-        .ok_or_else(|| RenderError::Layout("positioned width overflow".into()))?;
-    let bottom = bounds
-        .y
-        .checked_add(bounds.height)
-        .ok_or_else(|| RenderError::Layout("positioned height overflow".into()))?;
-    if bounds.width == 0 || bounds.height == 0 || bottom > tape_width_px {
+    let element_number = element_index + 1;
+    let right = bounds.x.checked_add(bounds.width).ok_or_else(|| {
+        RenderError::Layout(format!(
+            "positioned {element_kind} element {element_number} has horizontal bounds that are too large"
+        ))
+    })?;
+    let bottom = bounds.y.checked_add(bounds.height).ok_or_else(|| {
+        RenderError::Layout(format!(
+            "positioned {element_kind} element {element_number} has vertical bounds that are too large"
+        ))
+    })?;
+
+    let raster_left = scale_positioned_edge(bounds.x, document_dpi, target.feed_dpi)?;
+    let raster_right = scale_positioned_edge(right, document_dpi, target.feed_dpi)?;
+    let raster_top = scale_positioned_edge(bounds.y, document_dpi, target.cross_dpi)?;
+    let raster_bottom = scale_positioned_edge(bottom, document_dpi, target.cross_dpi)?;
+
+    if raster_bottom > target.tape_width_px {
         return Err(RenderError::Layout(format!(
-            "element {} ({kind}) does not fit printable height {tape_width_px}",
-            index + 1
+            "positioned {element_kind} element {element_number} exceeds the {} px printable raster height: vertical bounds y={}, height={} at {} dpi map to rows {}..{} at {} dpi",
+            target.tape_width_px,
+            bounds.y,
+            bounds.height,
+            document_dpi,
+            raster_top,
+            raster_bottom,
+            target.cross_dpi,
         )));
     }
-    Ok((bounds, right))
+
+    Ok((
+        ElementBounds {
+            x: raster_left,
+            y: raster_top,
+            width: raster_right - raster_left,
+            height: raster_bottom - raster_top,
+        },
+        right,
+    ))
+}
+
+fn scale_positioned_edge(value: u32, from_dpi: u16, to_dpi: u16) -> Result<u32> {
+    let scaled =
+        (u64::from(value) * u64::from(to_dpi) + u64::from(from_dpi) / 2) / u64::from(from_dpi);
+    u32::try_from(scaled)
+        .map_err(|_| RenderError::Layout("positioned layout dimensions are too large".to_string()))
 }
 
 fn require_no_rotation(rotation: f32, element: &str) -> Result<()> {
@@ -282,6 +336,10 @@ fn require_no_rotation(rotation: f32, element: &str) -> Result<()> {
 fn effectively_unrotated(rotation: f32) -> bool {
     let normalized = rotation.rem_euclid(360.0);
     normalized < 0.5 || (360.0 - normalized) < 0.5
+}
+
+fn scale(value: u32, from_dpi: u16, to_dpi: u16) -> u32 {
+    ((u64::from(value) * u64::from(to_dpi) + u64::from(from_dpi) / 2) / u64::from(from_dpi)) as u32
 }
 
 fn blit(destination: &mut LabelBitmap, source: &LabelBitmap, x: u32, y: u32) {
@@ -302,7 +360,7 @@ mod tests {
     }
     #[test]
     fn positioned_bounds_determine_length_and_reject_clipping() {
-        let result = render_positioned_document(&doc(12), 128).unwrap();
+        let result = render_positioned_document(&doc(12), 128, 180).unwrap();
         assert_eq!(result.element_bounds[0].x, 10);
         assert_eq!(result.element_bounds[0].y, 12);
         assert_eq!(
@@ -310,7 +368,19 @@ mod tests {
             80.max(13 + result.element_bounds[0].width)
         );
         let height = result.element_bounds[0].height;
-        assert!(render_positioned_document(&doc(128 - height), 128).is_ok());
-        assert!(render_positioned_document(&doc(129 - height), 128).is_err());
+        assert!(render_positioned_document(&doc(128 - height), 128, 180).is_ok());
+        assert!(render_positioned_document(&doc(129 - height), 128, 180).is_err());
+    }
+    #[test]
+    fn positioned_design_scales_to_the_printer_dpi() {
+        let document = doc(12);
+        let low = render_positioned_document(&document, 128, 180).unwrap();
+        let high = render_positioned_document(&document, 256, 360).unwrap();
+        assert_eq!(high.printer_raster.width(), low.printer_raster.width() * 2);
+        assert_eq!(
+            high.printer_raster.height(),
+            low.printer_raster.height() * 2
+        );
+        assert_eq!(high.element_bounds, low.element_bounds);
     }
 }
