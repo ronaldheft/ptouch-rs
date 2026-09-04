@@ -421,9 +421,7 @@ impl PtouchDevice {
             return Err(PtouchError::NotInitialized);
         }
 
-        if quality != protocol::PrintQuality::Standard
-            && !self.dev_info.flags.contains(DeviceFlags::LEGACY_HIRES)
-        {
+        if !protocol::supports_print_quality(self.dev_info.flags, quality) {
             return Err(PtouchError::UnsupportedQuality(
                 self.dev_info.name.to_string(),
             ));

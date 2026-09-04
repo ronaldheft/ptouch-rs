@@ -219,6 +219,9 @@ pub enum LabelElement {
         /// Target height in pixels. `None` = auto (fit to tape height).
         #[serde(skip_serializing_if = "Option::is_none")]
         target_height: Option<u32>,
+        /// Logical placement width, independent of source image sampling.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_width: Option<u32>,
         /// Mirror this element left-right (horizontal). Applied to the element's
         /// own bitmap, before it is composed into the label.
         #[serde(default)]
@@ -252,6 +255,7 @@ impl LabelElement {
             bitmap,
             rotation: 0.0,
             target_height: None,
+            target_width: None,
             flip_h: false,
             flip_v: false,
         }
@@ -570,6 +574,7 @@ mod tests {
                 bitmap,
                 rotation,
                 target_height,
+                target_width: None,
                 flip_h,
                 flip_v,
             },
@@ -728,6 +733,7 @@ mod tests {
                 bitmap,
                 rotation: 90.0,
                 target_height,
+                target_width: None,
                 flip_h: false,
                 flip_v: false,
             },
@@ -832,6 +838,7 @@ mod tests {
                 bitmap: None,
                 rotation: 0.0,
                 target_height: None,
+                target_width: None,
                 flip_h: false,
                 flip_v: false,
             }],

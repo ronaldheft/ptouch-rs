@@ -283,3 +283,21 @@ The MIT-licensed files are reusable on their own under the MIT license (see
 [LICENSE-MIT](LICENSE-MIT)). Any program that links `ptouch-core`, including the
 binaries in this repository, is covered by the GPLv3. See [NOTICE](NOTICE) for
 attribution details.
+
+## Native feed-resolution rendering
+
+PT-P710BT high quality renders 360 feed-axis samples per inch while keeping
+the 180 dpi print head. Quality is chosen at runtime with `--quality high`;
+the template remains reusable at standard quality and on other printers.
+Only PT-P710BT opts into native feed rendering. Legacy quality modes retain
+their existing protocol behavior.
+
+`--output` exports a square-pixel physical preview derived from the exact
+printer raster. High-quality previews double both image axes; the printer
+raster doubles only the feed axis. Text keeps grayscale coverage until this
+scaling completes. Binary images use nearest-neighbor placement.
+
+An image's optional `target_width` specifies logical placement independently
+of source sampling: a 466×128 source placed at 233×128 logical dots retains
+all feed samples in high-quality mode. Without a width, existing automatic
+image sizing remains unchanged. The GUI controls are a separate contribution.
