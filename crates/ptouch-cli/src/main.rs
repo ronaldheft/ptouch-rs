@@ -23,7 +23,7 @@ use ptouch_core::tape;
 use ptouch_core::transport::PtouchDevice;
 
 use ptouch_render::bitmap::LabelBitmap;
-use ptouch_render::document::{LabelDocument, LabelElement};
+use ptouch_render::document::{LabelDocument, LabelElement, LayoutMode};
 use ptouch_render::image_loader;
 use ptouch_render::layout::{RenderTarget, render_document};
 use ptouch_render::raster;
@@ -794,9 +794,12 @@ fn build_label_document(
 
         elements.push(LabelElement::Text {
             content: args.text.join("\n"),
-
+            x: None,
+            y: None,
+            font_name: None,
+            font_weight: None,
             font_size: args.size,
-
+            font_size_unit: None,
             align: args.align.to_text_align(),
             rotation: 0.0,
             flip_h: false,
@@ -817,7 +820,8 @@ fn build_label_document(
             path: Some(Path::new(img_path).to_path_buf()),
             image_data: Vec::new(),
             bitmap: Some(bitmap),
-
+            x: None,
+            y: None,
             rotation: 0.0,
             target_height: Some(print_width),
             target_width: None,
@@ -842,7 +846,9 @@ fn build_label_document(
         version: 1,
         tape_width_mm: 0,
         dpi,
-
+        layout: LayoutMode::Flow,
+        min_length: 0,
+        end_padding: 0,
         font_name: args.font.clone(),
         font_margin: args.margin,
         flip_h: args.flip_h,

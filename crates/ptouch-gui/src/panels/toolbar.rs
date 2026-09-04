@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use log::{error, info};
 
 use ptouch_render::document::LabelDocument;
+use ptouch_render::document::{FontSizeUnit, LayoutMode};
 use ptouch_render::raster;
 use ptouch_render::text::TextAlign;
 
@@ -18,9 +19,15 @@ pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
         // -- Element addition buttons --
         if ui.button("Add Text").clicked() {
+            let positioned = state.layout == LayoutMode::Positioned;
             state.elements.push(LabelElement::Text {
                 content: "Label".to_string(),
-                font_size: None,
+                x: positioned.then_some(0),
+                y: positioned.then_some(0),
+                font_name: None,
+                font_weight: positioned.then_some(400),
+                font_size: positioned.then_some(12.0),
+                font_size_unit: positioned.then_some(FontSizeUnit::Points),
                 align: TextAlign::Left,
                 rotation: 0.0,
                 flip_h: false,
@@ -31,6 +38,19 @@ pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             info!("Added text element");
         }
 
+        if ui.button("Add QR").clicked() {
+            state.elements.push(LabelElement::QrCode {
+                content: "Label".into(),
+                x: (state.layout == LayoutMode::Positioned).then_some(0),
+                y: (state.layout == LayoutMode::Positioned).then_some(0),
+                size: state.tape_width_px,
+                error_correction: ptouch_render::document::QrErrorCorrection::Medium,
+                min_module_size: 1,
+            });
+            state.selected_element = Some(state.elements.len() - 1);
+            state.mark_dirty();
+        }
+
         if ui.button("Add Image").clicked()
             && let Some(path) = crate::widgets::image_file_dialog().pick_file()
         {
@@ -38,7 +58,19 @@ pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             // label and stays self-contained when saved to a layout file.
             match std::fs::read(&path) {
                 Ok(bytes) => {
-                    let element = LabelElement::image_from_bytes(Some(path.clone()), bytes);
+                    let mut element = LabelElement::image_from_bytes(Some(path.clone()), bytes);
+                    if state.layout == LayoutMode::Positioned
+                        && let LabelElement::Image {
+                            x,
+                            y,
+                            target_height,
+                            ..
+                        } = &mut element
+                    {
+                        *x = Some(0);
+                        *y = Some(0);
+                        *target_height = Some(state.tape_width_px);
+                    }
                     // Reject files that do not decode, so a saved layout can
                     // always be reopened.
                     if matches!(element, LabelElement::Image { bitmap: None, .. }) {
@@ -58,14 +90,26 @@ pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
 
-        if ui.button("Cut Mark").clicked() {
+        if ui
+            .add_enabled(
+                state.layout == LayoutMode::Flow,
+                egui::Button::new("Cut Mark"),
+            )
+            .clicked()
+        {
             state.elements.push(LabelElement::CutMark);
             state.selected_element = Some(state.elements.len() - 1);
             state.mark_dirty();
             info!("Added cut mark");
         }
 
-        if ui.button("Padding").clicked() {
+        if ui
+            .add_enabled(
+                state.layout == LayoutMode::Flow,
+                egui::Button::new("Padding"),
+            )
+            .clicked()
+        {
             state.elements.push(LabelElement::Padding { pixels: 20 });
             state.selected_element = Some(state.elements.len() - 1);
             state.mark_dirty();
@@ -77,7 +121,7 @@ pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
         // -- Action buttons --
         let connected = state.printer_connected;
         let busy = state.operation_in_progress;
-        let has_bitmap = state.printer_bitmap.is_some();
+        let has_bitmap = state.preview_bitmap.is_some();
 
         if ui
             .add_enabled(connected && !busy && has_bitmap, egui::Button::new("Print"))

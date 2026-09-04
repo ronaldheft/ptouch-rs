@@ -98,13 +98,62 @@ impl TextRenderer {
         Ok(LabelBitmap::from_gray_image(&gray, 127))
     }
 
-    /// Render flow-layout text as grayscale while preserving tape-height
-    /// sizing, margins, and alignment.
-    pub(crate) fn render_flow_text_grayscale(
+    /// Render a flow element with its independent family and weight.
+    pub fn render_text_weighted(
         &mut self,
         lines: &[&str],
         print_width: u32,
+        font: (&str, u16),
+        font_size: Option<f32>,
+        font_margin: u32,
+        align: TextAlign,
+    ) -> Result<LabelBitmap> {
+        let gray = self.render_text_gray_to_height(
+            lines,
+            print_width,
+            font.0,
+            font_size,
+            font_margin,
+            align,
+            font.1,
+            true,
+        )?;
+        Ok(LabelBitmap::from_gray_image(&gray, 127))
+    }
+
+    /// Render tightly bounded grayscale text for positioned composition.
+    ///
+    /// The grayscale coverage is intentionally retained so callers can apply
+    /// anisotropic target geometry before converting to the printer's 1-bit
+    /// raster.
+    pub fn render_text_grayscale(
+        &mut self,
+        lines: &[&str],
         font_name: &str,
+        font_size: f32,
+        font_weight: u16,
+    ) -> Result<GrayImage> {
+        let height = ((font_size * 1.2).ceil() * lines.len() as f32)
+            .ceil()
+            .max(1.0) as u32;
+        self.render_text_gray_to_height(
+            lines,
+            height,
+            font_name,
+            Some(font_size),
+            0,
+            TextAlign::Left,
+            font_weight,
+            false,
+        )
+    }
+
+    /// Grayscale flow coverage with per-element typography retained.
+    pub(crate) fn render_styled_flow_grayscale(
+        &mut self,
+        lines: &[&str],
+        print_width: u32,
+        font: (&str, u16),
         font_size: Option<f32>,
         font_margin: u32,
         align: TextAlign,
@@ -112,11 +161,11 @@ impl TextRenderer {
         self.render_text_gray_to_height(
             lines,
             print_width,
-            font_name,
+            font.0,
             font_size,
             font_margin,
             align,
-            Weight::NORMAL.0,
+            font.1,
             true,
         )
     }

@@ -7,6 +7,7 @@ use log::{error, info};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
+use ptouch_render::document::{FontSizeUnit, LayoutMode, QrErrorCorrection};
 use ptouch_render::image_loader;
 use ptouch_render::text::TextAlign;
 
@@ -32,17 +33,28 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
     match &mut element {
         LabelElement::Text {
             content,
+            x,
+            y,
+            font_name,
+            font_weight,
             font_size,
+            font_size_unit,
             align,
             rotation,
             flip_h,
             flip_v,
+            ..
         } => {
             changed |= show_text_properties(
                 ui,
                 TextProps {
                     content,
+                    x,
+                    y,
+                    font_name,
+                    font_weight,
                     font_size,
+                    font_size_unit,
                     align,
                     rotation,
                     flip_h,
@@ -55,6 +67,8 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
             path,
             image_data,
             bitmap,
+            x,
+            y,
             rotation,
             target_height,
             target_width,
@@ -62,17 +76,40 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
             flip_v,
             ..
         } => {
-            changed |= show_logical_width(ui, target_width);
             changed |= show_image_properties(
                 ui,
                 ImageProps {
                     path,
                     image_data,
                     bitmap,
+                    x,
+                    y,
                     rotation,
                     target_height,
+                    target_width,
                     flip_h,
                     flip_v,
+                },
+                state,
+            );
+        }
+        LabelElement::QrCode {
+            content,
+            x,
+            y,
+            size,
+            error_correction,
+            min_module_size,
+        } => {
+            changed |= show_qr_properties(
+                ui,
+                QrProps {
+                    content,
+                    x,
+                    y,
+                    size,
+                    error_correction,
+                    min_module_size,
                 },
                 state,
             );
@@ -91,12 +128,99 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
         state.elements[selected] = element;
         state.mark_dirty();
     }
+
+    if let Some(bounds) = state.element_bounds.get(selected) {
+        ui.separator();
+        ui.label(format!(
+            "Rendered bounds: x={} y={} {}×{} px",
+            bounds.x, bounds.y, bounds.width, bounds.height
+        ));
+    }
+}
+
+/// Show properties for a semantic QR-code element. Returns true if changed.
+fn show_qr_properties(ui: &mut egui::Ui, props: QrProps, state: &AppState) -> bool {
+    let QrProps {
+        content,
+        x,
+        y,
+        size,
+        error_correction,
+        min_module_size,
+    } = props;
+    let mut changed = false;
+    ui.label("QR Content:");
+    changed |= ui
+        .add(
+            egui::TextEdit::multiline(content)
+                .desired_width(f32::INFINITY)
+                .desired_rows(3),
+        )
+        .changed();
+
+    if state.layout == LayoutMode::Positioned {
+        ui.add_space(4.0);
+        changed |= show_position(ui, x, y);
+    }
+
+    ui.horizontal(|ui| {
+        ui.label("Size:");
+        changed |= ui
+            .add(egui::DragValue::new(size).speed(1).range(1..=100_000))
+            .changed();
+        ui.label("px");
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Minimum module:");
+        changed |= ui
+            .add(
+                egui::DragValue::new(min_module_size)
+                    .speed(1)
+                    .range(1..=100),
+            )
+            .changed();
+        ui.label("px");
+    });
+
+    egui::ComboBox::from_label("Error correction")
+        .selected_text(error_correction.as_str().to_uppercase())
+        .show_ui(ui, |ui| {
+            changed |= ui
+                .selectable_value(error_correction, QrErrorCorrection::Low, "L")
+                .changed();
+            changed |= ui
+                .selectable_value(error_correction, QrErrorCorrection::Medium, "M")
+                .changed();
+            changed |= ui
+                .selectable_value(error_correction, QrErrorCorrection::Quartile, "Q")
+                .changed();
+            changed |= ui
+                .selectable_value(error_correction, QrErrorCorrection::High, "H")
+                .changed();
+        });
+    changed
+}
+
+/// Mutable references to a QR-code element's editable fields.
+struct QrProps<'a> {
+    content: &'a mut String,
+    x: &'a mut Option<u32>,
+    y: &'a mut Option<u32>,
+    size: &'a mut u32,
+    error_correction: &'a mut QrErrorCorrection,
+    min_module_size: &'a mut u32,
 }
 
 /// Mutable references to a text element's editable fields.
 struct TextProps<'a> {
     content: &'a mut String,
+    x: &'a mut Option<u32>,
+    y: &'a mut Option<u32>,
+    font_name: &'a mut Option<String>,
+    font_weight: &'a mut Option<u16>,
     font_size: &'a mut Option<f32>,
+    font_size_unit: &'a mut Option<FontSizeUnit>,
     align: &'a mut TextAlign,
     rotation: &'a mut f32,
     flip_h: &'a mut bool,
@@ -108,8 +232,11 @@ struct ImageProps<'a> {
     path: &'a mut Option<PathBuf>,
     image_data: &'a mut Vec<u8>,
     bitmap: &'a mut Option<ptouch_render::bitmap::LabelBitmap>,
+    x: &'a mut Option<u32>,
+    y: &'a mut Option<u32>,
     rotation: &'a mut f32,
     target_height: &'a mut Option<u32>,
+    target_width: &'a mut Option<u32>,
     flip_h: &'a mut bool,
     flip_v: &'a mut bool,
 }
@@ -131,11 +258,30 @@ fn show_flip_controls(ui: &mut egui::Ui, flip_h: &mut bool, flip_v: &mut bool) -
     changed
 }
 
+fn show_position(ui: &mut egui::Ui, x: &mut Option<u32>, y: &mut Option<u32>) -> bool {
+    let mut changed = x.is_none() || y.is_none();
+    let x = x.get_or_insert(0);
+    let y = y.get_or_insert(0);
+    ui.horizontal(|ui| {
+        ui.label("X:");
+        changed |= ui.add(egui::DragValue::new(x).range(0..=100_000)).changed();
+        ui.label("Y:");
+        changed |= ui.add(egui::DragValue::new(y).range(0..=100_000)).changed();
+        ui.label("px");
+    });
+    changed
+}
+
 /// Show properties for a text element. Returns true if any value changed.
 fn show_text_properties(ui: &mut egui::Ui, props: TextProps, state: &mut AppState) -> bool {
     let TextProps {
         content,
+        x,
+        y,
+        font_name,
+        font_weight,
         font_size,
+        font_size_unit,
         align,
         rotation,
         flip_h,
@@ -153,8 +299,14 @@ fn show_text_properties(ui: &mut egui::Ui, props: TextProps, state: &mut AppStat
         changed = true;
     }
 
+    if state.layout == LayoutMode::Positioned {
+        ui.add_space(4.0);
+        changed |= show_position(ui, x, y);
+    }
+
     ui.add_space(8.0);
 
+    changed |= show_typography(ui, font_name, font_weight, font_size_unit, state);
     // Font name (searchable dropdown)
     ui.label("Font:");
     ui.add(
@@ -186,8 +338,13 @@ fn show_text_properties(ui: &mut egui::Ui, props: TextProps, state: &mut AppStat
     ui.add_space(4.0);
 
     // Font size
+    let positioned = state.layout == LayoutMode::Positioned;
+    if positioned && font_size.is_none() {
+        *font_size = Some(12.0);
+        changed = true;
+    }
     let mut use_auto = font_size.is_none();
-    if ui.checkbox(&mut use_auto, "Auto font size").changed() {
+    if !positioned && ui.checkbox(&mut use_auto, "Auto font size").changed() {
         if use_auto {
             *font_size = None;
         } else {
@@ -210,51 +367,61 @@ fn show_text_properties(ui: &mut egui::Ui, props: TextProps, state: &mut AppStat
 
     ui.add_space(4.0);
 
-    // Font margin
-    ui.horizontal(|ui| {
-        ui.label("Margin:");
-        if ui
-            .add(
-                egui::DragValue::new(&mut state.font_margin)
-                    .speed(1.0)
-                    .range(0..=50),
-            )
-            .changed()
-        {
-            changed = true;
-        }
-        ui.label("px");
-    });
+    if !positioned {
+        ui.horizontal(|ui| {
+            ui.label("Margin:");
+            if ui
+                .add(
+                    egui::DragValue::new(&mut state.font_margin)
+                        .speed(1.0)
+                        .range(0..=50),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            ui.label("px");
+        });
+    }
 
     ui.add_space(4.0);
 
-    // Alignment
-    ui.label("Alignment:");
-    ui.horizontal(|ui| {
-        if ui
-            .selectable_label(matches!(align, TextAlign::Left), "Left")
-            .clicked()
-        {
-            *align = TextAlign::Left;
-            changed = true;
-        }
-        if ui
-            .selectable_label(matches!(align, TextAlign::Center), "Center")
-            .clicked()
-        {
-            *align = TextAlign::Center;
-            changed = true;
-        }
-        if ui
-            .selectable_label(matches!(align, TextAlign::Right), "Right")
-            .clicked()
-        {
-            *align = TextAlign::Right;
-            changed = true;
-        }
-    });
+    if !positioned {
+        // Alignment controls the horizontal placement within a flow segment.
+        ui.label("Alignment:");
+        ui.horizontal(|ui| {
+            if ui
+                .selectable_label(matches!(align, TextAlign::Left), "Left")
+                .clicked()
+            {
+                *align = TextAlign::Left;
+                changed = true;
+            }
+            if ui
+                .selectable_label(matches!(align, TextAlign::Center), "Center")
+                .clicked()
+            {
+                *align = TextAlign::Center;
+                changed = true;
+            }
+            if ui
+                .selectable_label(matches!(align, TextAlign::Right), "Right")
+                .clicked()
+            {
+                *align = TextAlign::Right;
+                changed = true;
+            }
+        });
+        ui.add_space(4.0);
+    }
 
-    ui.add_space(4.0);
+    // Positioned text intentionally stays axis-aligned so glyph coverage can
+    // remain grayscale through the anisotropic target transform.
+    if positioned {
+        ui.add_space(4.0);
+        changed |= show_flip_controls(ui, flip_h, flip_v);
+        return changed;
+    }
 
     // Rotation
     ui.label("Rotation:");
@@ -346,8 +513,11 @@ fn show_image_properties(ui: &mut egui::Ui, props: ImageProps, state: &mut AppSt
         path,
         image_data,
         bitmap,
+        x,
+        y,
         rotation,
         target_height,
+        target_width,
         flip_h,
         flip_v,
     } = props;
@@ -355,6 +525,11 @@ fn show_image_properties(ui: &mut egui::Ui, props: ImageProps, state: &mut AppSt
 
     ui.label("Image");
     ui.add_space(4.0);
+
+    if state.layout == LayoutMode::Positioned {
+        changed |= show_position(ui, x, y);
+        ui.add_space(4.0);
+    }
 
     let file_label = path
         .as_ref()
@@ -388,6 +563,8 @@ fn show_image_properties(ui: &mut egui::Ui, props: ImageProps, state: &mut AppSt
 
     ui.add_space(8.0);
 
+    changed |= show_logical_width(ui, target_width);
+
     // Height sizing (auto = fit to tape, manual = user-specified)
     let mut use_auto = target_height.is_none();
     if ui.checkbox(&mut use_auto, "Auto height").changed() {
@@ -412,7 +589,37 @@ fn show_image_properties(ui: &mut egui::Ui, props: ImageProps, state: &mut AppSt
         });
     }
 
+    if state.layout == LayoutMode::Positioned {
+        if target_width.is_none() {
+            changed = true;
+        }
+        let width = target_width.get_or_insert_with(|| {
+            bitmap
+                .as_ref()
+                .filter(|bitmap| bitmap.height() > 0)
+                .map(|bitmap| {
+                    let height = target_height.unwrap_or(state.tape_width_px);
+                    ((u64::from(bitmap.width()) * u64::from(height)) / u64::from(bitmap.height()))
+                        .max(1) as u32
+                })
+                .unwrap_or(1)
+        });
+        ui.horizontal(|ui| {
+            ui.label("Width:");
+            changed |= ui
+                .add(egui::DragValue::new(width).speed(1).range(1..=100_000))
+                .changed();
+            ui.label("px");
+        });
+    }
+
     ui.add_space(4.0);
+
+    if state.layout == LayoutMode::Positioned {
+        ui.add_space(4.0);
+        changed |= show_flip_controls(ui, flip_h, flip_v);
+        return changed;
+    }
 
     // Rotation
     ui.label("Rotation:");
@@ -497,6 +704,68 @@ fn show_padding_properties(ui: &mut egui::Ui, pixels: &mut u32) -> bool {
         }
     });
 
+    changed
+}
+
+/// Element overrides leave the existing document defaults available below.
+fn show_typography(
+    ui: &mut egui::Ui,
+    family: &mut Option<String>,
+    weight: &mut Option<u16>,
+    unit: &mut Option<FontSizeUnit>,
+    state: &AppState,
+) -> bool {
+    let mut changed = false;
+    let mut inherit = family.is_none();
+    if ui.checkbox(&mut inherit, "Use document font").changed() {
+        *family = if inherit {
+            None
+        } else {
+            Some(state.font_name.clone())
+        };
+        changed = true;
+    }
+    if let Some(family) = family {
+        egui::ComboBox::from_label("Element font")
+            .selected_text(family.as_str())
+            .show_ui(ui, |ui| {
+                for font in &state.available_fonts {
+                    changed |= ui.selectable_value(family, font.clone(), font).changed();
+                }
+            });
+    }
+    let mut value = weight.unwrap_or(400);
+    ui.horizontal(|ui| {
+        ui.label("Element weight:");
+        if ui
+            .add(egui::DragValue::new(&mut value).speed(100).range(1..=1000))
+            .changed()
+        {
+            *weight = Some(value);
+            changed = true;
+        }
+    });
+    let default_unit = if state.layout == LayoutMode::Positioned {
+        "Default (pt)"
+    } else {
+        "Legacy flow size"
+    };
+    egui::ComboBox::from_label("Size unit")
+        .selected_text(match unit {
+            None => default_unit,
+            Some(FontSizeUnit::Points) => "pt",
+            Some(FontSizeUnit::Pixels) => "px",
+        })
+        .show_ui(ui, |ui| {
+            changed |= ui.selectable_value(unit, None, default_unit).changed();
+            changed |= ui
+                .selectable_value(unit, Some(FontSizeUnit::Points), "pt")
+                .changed();
+            changed |= ui
+                .selectable_value(unit, Some(FontSizeUnit::Pixels), "px")
+                .changed();
+        });
+    ui.separator();
     changed
 }
 

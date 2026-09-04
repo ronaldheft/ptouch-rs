@@ -23,7 +23,48 @@ use crate::image_loader::{self, ImageLoadOptions};
 use crate::text::{TextAlign, TextRenderer};
 
 /// Current on-disk layout format version.
-pub const DOCUMENT_VERSION: u32 = 1;
+pub const DOCUMENT_VERSION: u32 = 2;
+
+/// How elements are arranged on the label.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutMode {
+    /// Compose elements from left to right using the version 1 behavior.
+    #[default]
+    Flow,
+    /// Place elements at explicit coordinates on a shared canvas.
+    Positioned,
+}
+
+impl LayoutMode {
+    fn is_flow(&self) -> bool {
+        *self == Self::Flow
+    }
+}
+
+/// Unit used by an explicitly sized text element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FontSizeUnit {
+    /// Typographic points (1/72 inch).
+    #[serde(rename = "pt")]
+    Points,
+    /// Logical layout pixels.
+    #[serde(rename = "px")]
+    Pixels,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+fn default_qr_min_module_size() -> u32 {
+    1
+}
+
+fn is_one(value: &u32) -> bool {
+    *value == 1
+}
 
 /// Default design resolution for layouts saved before the dpi field existed.
 fn default_dpi() -> u16 {
@@ -42,6 +83,15 @@ pub struct LabelDocument {
     /// this field default to 180 dpi.
     #[serde(default = "default_dpi")]
     pub dpi: u16,
+    /// Element arrangement. Omitted version 1 layouts use flow composition.
+    #[serde(default, skip_serializing_if = "LayoutMode::is_flow")]
+    pub layout: LayoutMode,
+    /// Minimum positioned-label length in logical layout pixels.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub min_length: u32,
+    /// Blank space after the rightmost positioned element, in logical pixels.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub end_padding: u32,
     /// Font family name used for text elements.
     pub font_name: String,
     /// Font top/bottom margin in pixels.
@@ -61,6 +111,7 @@ pub struct LabelDocument {
 impl LabelDocument {
     /// Serialize the document to a TOML string.
     pub fn to_toml_string(&self) -> Result<String> {
+        self.validate_version()?;
         Ok(toml::to_string(self)?)
     }
 
@@ -70,14 +121,35 @@ impl LabelDocument {
     /// into its render cache, so the returned document is ready to render.
     pub fn from_toml_str(text: &str) -> Result<Self> {
         let mut doc: LabelDocument = toml::from_str(text)?;
-        if doc.version == 0 || doc.version > DOCUMENT_VERSION {
-            return Err(RenderError::Layout(format!(
-                "unsupported layout version {} (this build supports up to {})",
-                doc.version, DOCUMENT_VERSION
-            )));
-        }
+        doc.validate_version()?;
         doc.decode_image_caches()?;
         Ok(doc)
+    }
+
+    /// Validate format-version requirements shared by parsed and programmatic documents.
+    pub fn validate_version(&self) -> Result<()> {
+        if self.version == 0 || self.version > DOCUMENT_VERSION {
+            return Err(RenderError::Layout(format!(
+                "unsupported layout version {} (this build supports up to {})",
+                self.version, DOCUMENT_VERSION
+            )));
+        }
+        if self.layout == LayoutMode::Positioned && self.version < 2 {
+            return Err(RenderError::Layout(
+                "positioned layout requires layout version 2".to_string(),
+            ));
+        }
+        if self.version < 2
+            && self
+                .elements
+                .iter()
+                .any(|element| matches!(element, LabelElement::QrCode { .. }))
+        {
+            return Err(RenderError::Layout(
+                "QR code elements require layout version 2".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Decode every image element's embedded bytes into its render cache.
@@ -102,28 +174,34 @@ impl LabelDocument {
         Ok(())
     }
 
-    /// Collect the unique `{{name}}` placeholder names used in text elements.
+    /// Collect the unique `{{name}}` placeholder names used in semantic elements.
     ///
     /// The result is sorted for stable display and de-duplication.
     pub fn placeholders(&self) -> Vec<String> {
         let mut names = BTreeSet::new();
         for element in &self.elements {
-            if let LabelElement::Text { content, .. } = element {
-                collect_placeholder_names(content, &mut names);
+            match element {
+                LabelElement::Text { content, .. } | LabelElement::QrCode { content, .. } => {
+                    collect_placeholder_names(content, &mut names);
+                }
+                _ => {}
             }
         }
         names.into_iter().collect()
     }
 
-    /// Replace `{{name}}` placeholders in all text elements using `values`.
+    /// Replace `{{name}}` placeholders in all semantic elements using `values`.
     ///
     /// A placeholder with no matching value is replaced with an empty string;
     /// callers that want to reject missing values should check
     /// [`LabelDocument::placeholders`] against the provided keys first.
     pub fn apply_values(&mut self, values: &BTreeMap<String, String>) {
         for element in &mut self.elements {
-            if let LabelElement::Text { content, .. } = element {
-                *content = substitute_placeholders(content, |name| values.get(name).cloned());
+            match element {
+                LabelElement::Text { content, .. } | LabelElement::QrCode { content, .. } => {
+                    *content = substitute_placeholders(content, |name| values.get(name).cloned());
+                }
+                _ => {}
             }
         }
     }
@@ -179,6 +257,36 @@ fn substitute_placeholders(content: &str, lookup: impl Fn(&str) -> Option<String
     result
 }
 
+/// Error-correction level for a semantic QR-code element.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QrErrorCorrection {
+    /// Approximately 7% of codewords can be restored.
+    #[serde(rename = "l")]
+    Low,
+    /// Approximately 15% of codewords can be restored.
+    #[default]
+    #[serde(rename = "m")]
+    Medium,
+    /// Approximately 25% of codewords can be restored.
+    #[serde(rename = "q")]
+    Quartile,
+    /// Approximately 30% of codewords can be restored.
+    #[serde(rename = "h")]
+    High,
+}
+
+impl QrErrorCorrection {
+    /// PTL spelling of this correction level.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "l",
+            Self::Medium => "m",
+            Self::Quartile => "q",
+            Self::High => "h",
+        }
+    }
+}
+
 /// A single element in the label composition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -187,12 +295,29 @@ pub enum LabelElement {
     Text {
         /// Text content; newlines separate lines.
         content: String,
-        /// Explicit font size in points. `None` means auto-fit to tape height.
+        /// Horizontal coordinate in logical layout pixels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<u32>,
+        /// Vertical coordinate in logical layout pixels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<u32>,
+        /// Font family override. `None` inherits the document font.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font_name: Option<String>,
+        /// CSS-style font weight from 1 through 1000. `None` means regular.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font_weight: Option<u16>,
+        /// Explicit font size. `None` means auto-fit to tape height in flow layouts.
         #[serde(skip_serializing_if = "Option::is_none")]
         font_size: Option<f32>,
+        /// Unit for `font_size`. Positioned text defaults to points when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font_size_unit: Option<FontSizeUnit>,
         /// Horizontal alignment of the text block.
+        #[serde(default)]
         align: TextAlign,
         /// Rotation angle in degrees (clockwise). 0.0 = horizontal.
+        #[serde(default)]
         rotation: f32,
         /// Mirror this element left-right (horizontal). Applied to the element's
         /// own bitmap, before it is composed into the label.
@@ -214,12 +339,19 @@ pub enum LabelElement {
         /// Decoded render cache; rebuilt from `image_data`, never serialized.
         #[serde(skip)]
         bitmap: Option<LabelBitmap>,
+        /// Horizontal coordinate in logical layout pixels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<u32>,
+        /// Vertical coordinate in logical layout pixels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<u32>,
         /// Rotation angle in degrees (clockwise). 0.0 = horizontal.
+        #[serde(default)]
         rotation: f32,
         /// Target height in pixels. `None` = auto (fit to tape height).
         #[serde(skip_serializing_if = "Option::is_none")]
         target_height: Option<u32>,
-        /// Logical placement width, independent of source image sampling.
+        /// Target width in logical layout pixels. `None` preserves aspect ratio.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_width: Option<u32>,
         /// Mirror this element left-right (horizontal). Applied to the element's
@@ -230,6 +362,26 @@ pub enum LabelElement {
         /// own bitmap, before it is composed into the label.
         #[serde(default)]
         flip_v: bool,
+    },
+    /// A QR code generated from semantic content at render time.
+    #[serde(rename = "qr")]
+    QrCode {
+        /// Content encoded in the QR symbol. May contain template placeholders.
+        content: String,
+        /// Horizontal coordinate in logical layout pixels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<u32>,
+        /// Vertical coordinate in logical layout pixels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<u32>,
+        /// Width and height of the QR canvas in logical layout pixels.
+        size: u32,
+        /// QR error-correction level.
+        #[serde(default)]
+        error_correction: QrErrorCorrection,
+        /// Smallest allowed square module size in logical pixels.
+        #[serde(default = "default_qr_min_module_size", skip_serializing_if = "is_one")]
+        min_module_size: u32,
     },
     /// A cut mark separator.
     CutMark,
@@ -253,6 +405,8 @@ impl LabelElement {
             path,
             image_data,
             bitmap,
+            x: None,
+            y: None,
             rotation: 0.0,
             target_height: None,
             target_width: None,
@@ -271,14 +425,7 @@ impl LabelElement {
     /// Returns a short display name for the element list.
     pub fn display_name(&self) -> String {
         match self {
-            LabelElement::Text { content, .. } => {
-                let preview: String = content.chars().take(20).collect();
-                if content.chars().count() > 20 {
-                    format!("Text: {}...", preview)
-                } else {
-                    format!("Text: {}", preview)
-                }
-            }
+            LabelElement::Text { content, .. } => content_display_name("Text", content),
             LabelElement::Image { path, .. } => {
                 let name = path
                     .as_ref()
@@ -287,9 +434,19 @@ impl LabelElement {
                     .unwrap_or_else(|| "embedded".to_string());
                 format!("Image: {}", name)
             }
+            LabelElement::QrCode { content, .. } => content_display_name("QR", content),
             LabelElement::CutMark => "Cut Mark".to_string(),
             LabelElement::Padding { pixels } => format!("Padding: {} px", pixels),
         }
+    }
+}
+
+fn content_display_name(kind: &str, content: &str) -> String {
+    let preview: String = content.chars().take(20).collect();
+    if content.chars().count() > 20 {
+        format!("{kind}: {preview}...")
+    } else {
+        format!("{kind}: {preview}")
     }
 }
 
@@ -299,6 +456,7 @@ struct FontSettings<'a> {
     name: &'a str,
     /// Top/bottom margin in pixels.
     margin: u32,
+    weight: u16,
 }
 
 /// Render an ordered element list into a single label bitmap.
@@ -314,6 +472,30 @@ pub fn render_elements(
     font_margin: u32,
     renderer: &mut TextRenderer,
 ) -> Result<Option<LabelBitmap>> {
+    render_elements_at_dpi(
+        elements,
+        tape_width_px,
+        font_name,
+        font_margin,
+        180,
+        renderer,
+    )
+}
+
+/// Render flow elements with explicit font units resolved at the document DPI.
+pub fn render_elements_at_dpi(
+    elements: &[LabelElement],
+    tape_width_px: u32,
+    font_name: &str,
+    font_margin: u32,
+    dpi: u16,
+    renderer: &mut TextRenderer,
+) -> Result<Option<LabelBitmap>> {
+    if dpi == 0 {
+        return Err(RenderError::Layout(
+            "document DPI must be greater than zero".into(),
+        ));
+    }
     let mut result: Option<LabelBitmap> = None;
 
     for element in elements {
@@ -321,20 +503,28 @@ pub fn render_elements(
             LabelElement::Text {
                 content,
                 font_size,
+                font_name: element_font,
+                font_weight,
+                font_size_unit,
                 align,
                 rotation,
                 flip_h,
                 flip_v,
+                ..
             } => match render_text_segment(
                 renderer,
                 content,
-                *font_size,
+                font_size.map(|size| match font_size_unit {
+                    Some(FontSizeUnit::Points) => size * f32::from(dpi) / 72.0,
+                    Some(FontSizeUnit::Pixels) | None => size,
+                }),
                 *align,
                 *rotation,
                 tape_width_px,
                 &FontSettings {
-                    name: font_name,
+                    name: element_font.as_deref().unwrap_or(font_name),
                     margin: font_margin,
+                    weight: font_weight.unwrap_or(400),
                 },
             ) {
                 Some(seg) => seg.mirrored(*flip_h, *flip_v),
@@ -358,6 +548,21 @@ pub fn render_elements(
                 Some(seg) => seg.mirrored(*flip_h, *flip_v),
                 None => continue,
             },
+            LabelElement::QrCode {
+                content,
+                size,
+                error_correction,
+                min_module_size,
+                ..
+            } => {
+                if *size > tape_width_px {
+                    return Err(RenderError::Layout(
+                        "QR canvas exceeds printable height".into(),
+                    ));
+                }
+                crate::qr::render_qr(content, *error_correction, *size, *min_module_size)?
+                    .fit_height(tape_width_px)
+            }
             LabelElement::CutMark => compose::cutmark(tape_width_px),
             LabelElement::Padding { pixels } => compose::padding(tape_width_px, *pixels),
         };
@@ -405,10 +610,10 @@ fn render_text_segment(
         tape_width_px
     };
 
-    let bmp = match renderer.render_text(
+    let bmp = match renderer.render_text_weighted(
         &lines,
         render_height,
-        font.name,
+        (font.name, font.weight),
         effective_font_size,
         font.margin,
         align,
@@ -572,6 +777,8 @@ mod tests {
                 path,
                 image_data,
                 bitmap,
+                x: None,
+                y: None,
                 rotation,
                 target_height,
                 target_width: None,
@@ -696,7 +903,12 @@ mod tests {
         let mut renderer = TextRenderer::new();
         let elements = vec![LabelElement::Text {
             content: String::new(),
+            x: None,
+            y: None,
+            font_name: None,
+            font_weight: None,
             font_size: Some(24.0),
+            font_size_unit: None,
             align: TextAlign::Left,
             rotation: 0.0,
             flip_h: false,
@@ -731,6 +943,8 @@ mod tests {
                 path,
                 image_data,
                 bitmap,
+                x: None,
+                y: None,
                 rotation: 90.0,
                 target_height,
                 target_width: None,
@@ -748,9 +962,12 @@ mod tests {
     /// Build a small document containing one of each element kind.
     fn sample_document() -> LabelDocument {
         LabelDocument {
-            version: DOCUMENT_VERSION,
+            version: 1,
             tape_width_mm: 12,
             dpi: 180,
+            layout: LayoutMode::Flow,
+            min_length: 0,
+            end_padding: 0,
             font_name: "DejaVuSans".into(),
             font_margin: 2,
             flip_h: false,
@@ -758,7 +975,12 @@ mod tests {
             elements: vec![
                 LabelElement::Text {
                     content: "Hi".into(),
+                    x: None,
+                    y: None,
+                    font_name: None,
+                    font_weight: None,
                     font_size: Some(24.0),
+                    font_size_unit: None,
                     align: TextAlign::Center,
                     rotation: 0.0,
                     flip_h: false,
@@ -812,14 +1034,104 @@ mod tests {
             version: DOCUMENT_VERSION + 1,
             tape_width_mm: 12,
             dpi: 180,
+            layout: LayoutMode::Flow,
+            min_length: 0,
+            end_padding: 0,
             font_name: "x".into(),
             font_margin: 0,
             flip_h: false,
             flip_v: false,
             elements: vec![LabelElement::CutMark],
         };
-        let text = doc.to_toml_string().unwrap();
+        assert!(doc.to_toml_string().is_err());
+        let text = toml::to_string(&doc).unwrap();
         assert!(LabelDocument::from_toml_str(&text).is_err());
+    }
+
+    #[test]
+    fn positioned_v2_document_parses_layout_and_element_geometry() {
+        let text = r#"
+version = 2
+tape_width_mm = 24
+dpi = 180
+layout = "positioned"
+min_length = 230
+end_padding = 3
+font_name = "Inter"
+font_margin = 0
+
+[[elements]]
+type = "text"
+content = "{{brand}}"
+x = 141
+y = 3
+font_name = "Inter"
+font_weight = 700
+font_size = 8
+font_size_unit = "pt"
+
+[[elements]]
+type = "image"
+x = 0
+y = 0
+target_width = 128
+target_height = 128
+image_data = ""
+"#;
+
+        let doc = LabelDocument::from_toml_str(text).unwrap();
+        assert_eq!(doc.version, 2);
+        assert_eq!(doc.layout, LayoutMode::Positioned);
+        assert_eq!((doc.min_length, doc.end_padding), (230, 3));
+        match &doc.elements[0] {
+            LabelElement::Text {
+                x,
+                y,
+                font_name,
+                font_weight,
+                font_size,
+                font_size_unit,
+                ..
+            } => {
+                assert_eq!((*x, *y), (Some(141), Some(3)));
+                assert_eq!(font_name.as_deref(), Some("Inter"));
+                assert_eq!(*font_weight, Some(700));
+                assert_eq!(*font_size, Some(8.0));
+                assert_eq!(*font_size_unit, Some(FontSizeUnit::Points));
+            }
+            _ => panic!("expected text element"),
+        }
+        match &doc.elements[1] {
+            LabelElement::Image {
+                x,
+                y,
+                target_width,
+                target_height,
+                ..
+            } => {
+                assert_eq!((*x, *y), (Some(0), Some(0)));
+                assert_eq!((*target_width, *target_height), (Some(128), Some(128)));
+            }
+            _ => panic!("expected image element"),
+        }
+    }
+
+    #[test]
+    fn positioned_layout_requires_version_two() {
+        let text = r#"
+version = 1
+tape_width_mm = 24
+dpi = 180
+layout = "positioned"
+min_length = 230
+end_padding = 3
+font_name = "Inter"
+font_margin = 0
+elements = []
+"#;
+
+        let error = LabelDocument::from_toml_str(text).unwrap_err();
+        assert!(error.to_string().contains("requires layout version 2"));
     }
 
     #[test]
@@ -828,6 +1140,9 @@ mod tests {
             version: DOCUMENT_VERSION,
             tape_width_mm: 12,
             dpi: 180,
+            layout: LayoutMode::Flow,
+            min_length: 0,
+            end_padding: 0,
             font_name: "x".into(),
             font_margin: 0,
             flip_h: false,
@@ -836,6 +1151,8 @@ mod tests {
                 path: None,
                 image_data: b"not a real image".to_vec(),
                 bitmap: None,
+                x: None,
+                y: None,
                 rotation: 0.0,
                 target_height: None,
                 target_width: None,
@@ -860,13 +1177,21 @@ mod tests {
             version: DOCUMENT_VERSION,
             tape_width_mm: 12,
             dpi: 180,
+            layout: LayoutMode::Flow,
+            min_length: 0,
+            end_padding: 0,
             font_name: "x".into(),
             font_margin: 0,
             flip_h: false,
             flip_v: false,
             elements: vec![LabelElement::Text {
                 content: content.into(),
+                x: None,
+                y: None,
+                font_name: None,
+                font_weight: None,
                 font_size: Some(24.0),
+                font_size_unit: None,
                 align: TextAlign::Left,
                 rotation: 0.0,
                 flip_h: false,
@@ -942,5 +1267,109 @@ mod tests {
             }
             _ => panic!("expected image element"),
         }
+    }
+
+    #[test]
+    fn semantic_qr_parses_and_participates_in_template_substitution() {
+        let text = r#"
+version = 2
+tape_width_mm = 24
+font_name = "sans-serif"
+font_margin = 0
+
+[[elements]]
+type = "qr"
+content = "https://example.com/returns/{{id}}"
+size = 120
+error_correction = "q"
+min_module_size = 2
+"#;
+
+        let mut document = LabelDocument::from_toml_str(text).unwrap();
+        assert_eq!(document.placeholders(), vec!["id".to_string()]);
+        document.apply_values(&BTreeMap::from([("id".to_string(), "ABC-123".to_string())]));
+
+        match &document.elements[0] {
+            LabelElement::QrCode {
+                content,
+                x,
+                y,
+                size,
+                error_correction,
+                min_module_size,
+            } => {
+                assert_eq!(content, "https://example.com/returns/ABC-123");
+                assert_eq!((*x, *y), (None, None));
+                assert_eq!(*size, 120);
+                assert_eq!(*error_correction, QrErrorCorrection::Quartile);
+                assert_eq!(*min_module_size, 2);
+            }
+            _ => panic!("expected QR code element"),
+        }
+    }
+
+    #[test]
+    fn semantic_qr_requires_version_two() {
+        let text = r#"
+version = 1
+tape_width_mm = 24
+font_name = "sans-serif"
+font_margin = 0
+
+[[elements]]
+type = "qr"
+content = "hello"
+size = 120
+"#;
+
+        let error = LabelDocument::from_toml_str(text).unwrap_err();
+        assert!(error.to_string().contains("require layout version 2"));
+    }
+    #[test]
+    fn explicit_points_and_pixels_resolve_to_the_same_flow_raster() {
+        let base = "version = 1\ntape_width_mm = 24\ndpi = 180\nfont_name = \"sans-serif\"\nfont_margin = 0\n[[elements]]\ntype = \"text\"\ncontent = \"Sample\"\nalign = \"left\"\nrotation = 0\n";
+        let points = LabelDocument::from_toml_str(&format!(
+            "{base}font_size = 8\nfont_size_unit = \"pt\"\nfont_weight = 700\n"
+        ))
+        .unwrap();
+        let pixels = LabelDocument::from_toml_str(&format!(
+            "{base}font_size = 20\nfont_size_unit = \"px\"\nfont_weight = 700\n"
+        ))
+        .unwrap();
+        let mut renderer = TextRenderer::new();
+        let render = |doc: &LabelDocument, renderer: &mut TextRenderer| {
+            render_elements_at_dpi(&doc.elements, 128, &doc.font_name, 0, doc.dpi, renderer)
+                .unwrap()
+                .unwrap()
+        };
+        let a = render(&points, &mut renderer);
+        let b = render(&pixels, &mut renderer);
+        assert_eq!(
+            (a.width(), a.height(), a.data()),
+            (b.width(), b.height(), b.data())
+        );
+        let roundtrip = LabelDocument::from_toml_str(&points.to_toml_string().unwrap()).unwrap();
+        assert!(matches!(
+            &roundtrip.elements[0],
+            LabelElement::Text {
+                font_weight: Some(700),
+                font_size_unit: Some(FontSizeUnit::Points),
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn serialization_rejects_programmatic_qr_in_version_one() {
+        let mut document = sample_document();
+        document.version = 1;
+        document.elements.push(LabelElement::QrCode {
+            x: None,
+            y: None,
+            content: "hello".into(),
+            size: 58,
+            error_correction: QrErrorCorrection::Low,
+            min_module_size: 2,
+        });
+        assert!(document.to_toml_string().is_err());
     }
 }

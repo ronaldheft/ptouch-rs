@@ -8,12 +8,13 @@ Rust tool for Brother P-Touch USB label printers. CLI and GUI.
 
 - Print text labels with custom font, size, alignment and rotation
 - Print images (PNG, JPEG, GIF, BMP, TIFF, WebP, SVG, and more)
-- Compose multi-element labels (text + image + cut mark + padding)
+- Compose flow labels or position text, images, and semantic QR codes at exact coordinates
 - Save and reload designs as self-contained `.ptl` layout files (images
   embedded), then print them from the GUI or CLI
 - Template layouts with `{{name}}` placeholders and batch-print from a CSV
 - Chain print and multi-copy support
-- Print quality modes on 360 dpi models (high resolution 360x720, draft 360x180)
+- Print quality modes on supported models, including native 360x180
+  high-resolution rendering
 - GUI with live preview, zoom, and drag-and-drop element reordering
 - Export to image (PNG, JPEG, BMP, GIF, TIFF, WebP) without a printer connected
 - Feed and cut tape without printing
@@ -139,6 +140,80 @@ ptouch print --layout badge.ptl --csv people.csv -o 'badge-{n}.png'
 # CSV from stdin, with a constant value applied to every row
 cat people.csv | ptouch print --layout badge.ptl --csv - --set dept=Eng
 ```
+
+### Positioned layouts
+
+Version 1 `.ptl` files keep their existing left-to-right `flow` behavior.
+Version 2 adds `layout = "positioned"`, where coordinates and dimensions are
+logical pixels at the document `dpi`. Each text element can override the
+document font family and select its own weight, size, and size unit (`pt` or
+`px`). The final tape length is the larger of `min_length` and the rightmost
+element edge plus `end_padding`.
+
+```toml
+version = 2
+tape_width_mm = 24
+dpi = 180
+layout = "positioned"
+min_length = 230
+end_padding = 3
+font_name = "Inter"
+font_margin = 0
+
+[[elements]]
+type = "text"
+content = "{{brand}}"
+x = 141
+y = 3
+font_name = "Inter"
+font_weight = 700
+font_size = 8
+font_size_unit = "pt"
+
+[[elements]]
+type = "text"
+content = "{{model}}"
+x = 141
+y = 28
+font_name = "Inter"
+font_weight = 300
+font_size = 8
+font_size_unit = "pt"
+```
+
+Positioned images use `x`, `y`, `target_width`, and `target_height`; images
+saved by the GUI remain embedded in the layout. On the PT-P710BT, high quality
+renders at twice the normal resolution along the tape feed before converting
+text to monochrome. Printer data remains 128 dots across 24 mm tape, while GUI
+and exported previews compensate for the rectangular printer pixels so the
+physical proportions remain accurate.
+
+The full printer-reported printable height is available to positioned elements;
+there is no additional design safe margin. Text, image, and QR bounds are
+converted from the document DPI to the target's cross-tape DPI and must fit
+within that actual raster. An element may end exactly at the printable edge,
+but rendering fails with a layout error if its bottom edge would be clipped.
+High-quality feed-axis scaling does not change this cross-tape limit.
+
+Version 2 layouts can generate QR codes directly from literal or templated
+content. `size` is the square logical-pixel canvas, including the required
+four-module quiet zone. Modules always use an integer number of pixels and are
+centered when the canvas has extra space. Error correction accepts `l`, `m`,
+`q`, or `h` and defaults to `m`. Set `min_module_size` when a printer or
+scanner requires more than the default one logical pixel per module.
+
+```toml
+[[elements]]
+type = "qr"
+content = "https://example.com/items/{{id}}"
+x = 0
+y = 0
+size = 128
+error_correction = "q"
+min_module_size = 2
+```
+
+Omit `x` and `y` to use a semantic QR code in a version 2 flow layout.
 
 ### Print options
 
@@ -284,32 +359,17 @@ The MIT-licensed files are reusable on their own under the MIT license (see
 binaries in this repository, is covered by the GPLv3. See [NOTICE](NOTICE) for
 attribution details.
 
-## Native feed-resolution rendering
+## Independent enhancement branches
 
-PT-P710BT high quality renders 360 feed-axis samples per inch while keeping
-the 180 dpi print head. Quality is chosen at runtime with `--quality high`;
-the template remains reusable at standard quality and on other printers.
-Only PT-P710BT opts into native feed rendering. Legacy quality modes retain
-their existing protocol behavior.
+The fork's positioning, typography, native target rendering and semantic QR
+core PRs each target `main`. Each corresponding UI PR depends only on its own
+core implementation. This integration combines all four UI branches and their
+core prerequisites. The shared renderer reconciles typography with positioned
+and native flow output; the standalone positioned entry point remains exposed.
 
-`--output` exports a square-pixel physical preview derived from the exact
-printer raster. High-quality previews double both image axes; the printer
-raster doubles only the feed axis. Text keeps grayscale coverage until this
-scaling completes. Binary images use nearest-neighbor placement.
+These changes preserve existing PTL files but add public Rust struct/enum
+fields. Downstream constructors and exhaustive matches need updating.
 
-An image's optional `target_width` specifies logical placement independently
-of source sampling: a 466×128 source placed at 233×128 logical dots retains
-all feed samples in high-quality mode. Without a width, existing automatic
-image sizing remains unchanged. The GUI controls are a separate contribution.
-
-Rust API compatibility: Image variant fields require updates to downstream
-constructors or exhaustive matches. This is separate from existing PTL file
-compatibility; older flow files remain supported.
-
-### Target rendering in the GUI
-
-The quality selector uses the connected printer's capabilities, including
-native PT-P710BT high quality. Printing consumes the exact anisotropic raster;
-preview and export use its square-pixel physical representation. Offline
-geometry uses the saved document DPI. Image properties expose optional logical
-width independently of source pixel dimensions.
+Flow-to-positioned conversion refuses rotations, cut marks and padding rather
+than silently discarding their meaning. The GUI can create QR elements, edit
+font overrides in either mode and set logical image width in flow mode.

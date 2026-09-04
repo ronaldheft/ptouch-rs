@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use ptouch_core::device::DeviceFlags;
 use ptouch_core::protocol::PrintQuality;
 use ptouch_render::bitmap::LabelBitmap;
-use ptouch_render::document::LabelDocument;
+use ptouch_render::document::{LabelDocument, LayoutMode};
 use ptouch_render::layout::ElementBounds;
 
 pub use ptouch_render::document::LabelElement;
@@ -61,6 +61,12 @@ pub struct AppState {
     pub tape_width_px: u32,
     /// Resolution used by logical positions and dimensions in the document.
     pub document_dpi: u16,
+    /// Current document layout mode.
+    pub layout: LayoutMode,
+    /// Minimum label length for positioned layouts.
+    pub min_length: u32,
+    /// Blank space after the rightmost positioned element.
+    pub end_padding: u32,
     /// Font name used for text rendering.
     pub font_name: String,
     /// Font top/bottom margin in pixels.
@@ -123,7 +129,9 @@ impl Default for AppState {
             tape_width_mm: 12,
             tape_width_px: 76,
             document_dpi: 180,
-
+            layout: LayoutMode::Flow,
+            min_length: 0,
+            end_padding: 0,
             font_name: "DejaVuSans".to_string(),
             font_margin: 0,
             overall_flip_h: false,
@@ -154,13 +162,36 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Switching layout modes must not discard flow-only elements or rotations.
+    pub fn can_use_positioned_layout(&self) -> bool {
+        self.elements.iter().all(|element| match element {
+            LabelElement::Text { rotation, .. } | LabelElement::Image { rotation, .. } => {
+                let angle = rotation.rem_euclid(360.0);
+                angle < 0.5 || (360.0 - angle) < 0.5
+            }
+            LabelElement::QrCode { .. } => true,
+            LabelElement::CutMark | LabelElement::Padding { .. } => false,
+        })
+    }
+
     /// Convert the editor state into its serialized document model.
     pub fn to_document(&self) -> LabelDocument {
         LabelDocument {
-            version: 1,
+            version: if self.layout == LayoutMode::Positioned
+                || self
+                    .elements
+                    .iter()
+                    .any(|element| matches!(element, LabelElement::QrCode { .. }))
+            {
+                2
+            } else {
+                1
+            },
             tape_width_mm: self.tape_width_mm,
             dpi: self.document_dpi,
-
+            layout: self.layout,
+            min_length: self.min_length,
+            end_padding: self.end_padding,
             font_name: self.font_name.clone(),
             font_margin: self.font_margin,
             flip_h: self.overall_flip_h,
@@ -173,6 +204,9 @@ impl AppState {
     pub fn apply_document(&mut self, document: LabelDocument) {
         self.tape_width_mm = document.tape_width_mm;
         self.document_dpi = document.dpi;
+        self.layout = document.layout;
+        self.min_length = document.min_length;
+        self.end_padding = document.end_padding;
         self.font_name = document.font_name;
         self.font_margin = document.font_margin;
         self.overall_flip_h = document.flip_h;
@@ -224,7 +258,83 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use ptouch_render::document::{FontSizeUnit, LayoutMode};
+    use ptouch_render::text::TextAlign;
+
     use super::*;
+
+    #[test]
+    fn positioned_document_round_trip_preserves_editor_fields() {
+        let mut state = AppState {
+            layout: LayoutMode::Positioned,
+            min_length: 230,
+            end_padding: 3,
+            ..AppState::default()
+        };
+        for (index, weight) in [700, 300, 500, 800].into_iter().enumerate() {
+            state.elements.push(LabelElement::Text {
+                content: format!("{{{{field_{index}}}}}"),
+                x: Some(141),
+                y: Some([3, 28, 52, 85][index]),
+                font_name: Some("Inter".to_string()),
+                font_weight: Some(weight),
+                font_size: Some(if index == 3 { 14.0 } else { 8.0 }),
+                font_size_unit: Some(FontSizeUnit::Points),
+                align: TextAlign::Left,
+                rotation: 0.0,
+                flip_h: false,
+                flip_v: false,
+            });
+        }
+
+        let serialized = state.to_document().to_toml_string().unwrap();
+        let document = LabelDocument::from_toml_str(&serialized).unwrap();
+        assert_eq!(document.version, 2);
+        assert_eq!(document.layout, LayoutMode::Positioned);
+        let weights: Vec<Option<u16>> = document
+            .elements
+            .iter()
+            .map(|element| match element {
+                LabelElement::Text { font_weight, .. } => *font_weight,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(weights, vec![Some(700), Some(300), Some(500), Some(800)]);
+
+        let mut restored = AppState::default();
+        restored.apply_document(document);
+        assert_eq!(restored.layout, LayoutMode::Positioned);
+        assert_eq!(restored.min_length, 230);
+        assert_eq!(restored.end_padding, 3);
+        match &restored.elements[0] {
+            LabelElement::Text {
+                x,
+                y,
+                font_name,
+                font_weight,
+                font_size_unit,
+                ..
+            } => {
+                assert_eq!((*x, *y), (Some(141), Some(3)));
+                assert_eq!(font_name.as_deref(), Some("Inter"));
+                assert_eq!(*font_weight, Some(700));
+                assert_eq!(*font_size_unit, Some(FontSizeUnit::Points));
+            }
+            _ => panic!("expected text element"),
+        }
+    }
+
+    #[test]
+    fn flow_qr_save_reopens_as_version_two() {
+        let text = "version = 2\ntape_width_mm = 24\nfont_name = \"sans-serif\"\nfont_margin = 0\n[[elements]]\ntype = \"qr\"\ncontent = \"HELLO\"\nsize = 58\n";
+        let mut state = AppState::default();
+        state.apply_document(LabelDocument::from_toml_str(text).unwrap());
+        let saved = state.to_document().to_toml_string().unwrap();
+        let reopened = LabelDocument::from_toml_str(&saved).unwrap();
+        assert_eq!(reopened.version, 2);
+        assert_eq!(reopened.layout, LayoutMode::Flow);
+        assert!(matches!(reopened.elements[0], LabelElement::QrCode { .. }));
+    }
     #[test]
     fn offline_tape_geometry_uses_document_resolution() {
         let mut state = AppState {
@@ -234,8 +344,35 @@ mod tests {
         };
         state.update_tape_pixels();
         assert_eq!(state.tape_width_px, 320);
+        assert_eq!(state.render_dpi(), 360);
         state.printer_flags = Some(DeviceFlags::FEED_HIRES);
         state.update_tape_pixels();
         assert_eq!(state.tape_width_px, 128);
+        assert_eq!(state.render_dpi(), 180);
+    }
+    #[test]
+    fn switching_layout_mode_does_not_discard_rotated_content() {
+        let mut state = AppState::default();
+        state.elements.push(LabelElement::Text {
+            font_name: None,
+            font_weight: None,
+            font_size_unit: None,
+            content: "Rotated".into(),
+            x: None,
+            y: None,
+            font_size: Some(12.0),
+            align: ptouch_render::text::TextAlign::Left,
+            rotation: 90.0,
+            flip_h: false,
+            flip_v: false,
+        });
+        assert!(!state.can_use_positioned_layout());
+        assert!(matches!(
+            &state.elements[0],
+            LabelElement::Text { rotation: 90.0, .. }
+        ));
+        state.elements.clear();
+        state.elements.push(LabelElement::CutMark);
+        assert!(!state.can_use_positioned_layout());
     }
 }
