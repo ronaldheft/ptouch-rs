@@ -313,3 +313,10 @@ are independent enhancements.
 Rust API compatibility: the new QR variant require updates to downstream
 constructors or exhaustive matches. This is separate from existing PTL file
 compatibility; older flow files remain supported.
+
+### QR editor
+
+Use **Add QR** to create an editable element, or open a version 2 QR layout.
+The properties panel edits content, canvas size, minimum module size and error
+correction. Saving retains a version 2 document so QR layouts reopen safely.
+The default QR canvas matches the selected tape's printable height.

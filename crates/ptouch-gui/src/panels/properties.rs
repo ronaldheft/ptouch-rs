@@ -7,6 +7,7 @@ use log::{error, info};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
+use ptouch_render::document::QrErrorCorrection;
 use ptouch_render::image_loader;
 use ptouch_render::text::TextAlign;
 
@@ -74,8 +75,21 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
                 state,
             );
         }
-        LabelElement::QrCode { .. } => {
-            ui.label("QR properties require the QR editor enhancement.");
+        LabelElement::QrCode {
+            content,
+            size,
+            error_correction,
+            min_module_size,
+        } => {
+            changed |= show_qr_properties(
+                ui,
+                QrProps {
+                    content,
+                    size,
+                    error_correction,
+                    min_module_size,
+                },
+            );
         }
         LabelElement::CutMark => {
             ui.label("Cut Mark");
@@ -498,4 +512,69 @@ fn show_padding_properties(ui: &mut egui::Ui, pixels: &mut u32) -> bool {
     });
 
     changed
+}
+
+/// Show properties for a semantic QR-code element. Returns true if changed.
+fn show_qr_properties(ui: &mut egui::Ui, props: QrProps) -> bool {
+    let QrProps {
+        content,
+        size,
+        error_correction,
+        min_module_size,
+    } = props;
+    let mut changed = false;
+    ui.label("QR Content:");
+    changed |= ui
+        .add(
+            egui::TextEdit::multiline(content)
+                .desired_width(f32::INFINITY)
+                .desired_rows(3),
+        )
+        .changed();
+
+    ui.horizontal(|ui| {
+        ui.label("Size:");
+        changed |= ui
+            .add(egui::DragValue::new(size).speed(1).range(1..=100_000))
+            .changed();
+        ui.label("px");
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Minimum module:");
+        changed |= ui
+            .add(
+                egui::DragValue::new(min_module_size)
+                    .speed(1)
+                    .range(1..=100),
+            )
+            .changed();
+        ui.label("px");
+    });
+
+    egui::ComboBox::from_label("Error correction")
+        .selected_text(error_correction.as_str().to_uppercase())
+        .show_ui(ui, |ui| {
+            changed |= ui
+                .selectable_value(error_correction, QrErrorCorrection::Low, "L")
+                .changed();
+            changed |= ui
+                .selectable_value(error_correction, QrErrorCorrection::Medium, "M")
+                .changed();
+            changed |= ui
+                .selectable_value(error_correction, QrErrorCorrection::Quartile, "Q")
+                .changed();
+            changed |= ui
+                .selectable_value(error_correction, QrErrorCorrection::High, "H")
+                .changed();
+        });
+    changed
+}
+
+/// Mutable references to a QR-code element's editable fields.
+struct QrProps<'a> {
+    content: &'a mut String,
+    size: &'a mut u32,
+    error_correction: &'a mut QrErrorCorrection,
+    min_module_size: &'a mut u32,
 }
