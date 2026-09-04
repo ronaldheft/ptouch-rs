@@ -147,12 +147,18 @@ pub fn render_document(document: &LabelDocument, target: RenderTarget) -> Result
                 y,
                 size,
                 error_correction,
+                source,
                 min_module_size,
             } => {
                 let x = required_coordinate(*x, "QR code", "x")?;
                 let y = required_coordinate(*y, "QR code", "y")?;
-                let source =
-                    crate::qr::render_qr(content, *error_correction, *size, *min_module_size)?;
+                let source = crate::qr::render_qr(
+                    content,
+                    *error_correction,
+                    *size,
+                    *min_module_size,
+                    source.as_ref(),
+                )?;
                 PositionedElement::Image {
                     source,
                     bounds: ElementBounds {
@@ -730,6 +736,7 @@ mod tests {
                 y: Some(6),
                 size: 58,
                 error_correction: QrErrorCorrection::Low,
+                source: None,
                 min_module_size: 2,
             }],
         };
@@ -858,6 +865,7 @@ mod tests {
                 y: None,
                 size: 58,
                 error_correction: QrErrorCorrection::Low,
+                source: None,
                 min_module_size: 2,
             }],
         };
@@ -956,6 +964,7 @@ mod tests {
                 y: Some(0),
                 size: 58,
                 error_correction: QrErrorCorrection::Low,
+                source: None,
                 min_module_size: 2,
             }],
         };
@@ -1015,6 +1024,7 @@ mod tests {
                 y: None,
                 size: 58,
                 error_correction: QrErrorCorrection::Low,
+                source: None,
                 min_module_size: 2,
             }],
         };
