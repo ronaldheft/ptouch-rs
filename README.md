@@ -310,6 +310,10 @@ This core change renders imported QR layouts in the GUI, but the QR editing
 controls are a separate contribution. Positioning and native target rendering
 are independent enhancements.
 
+Rust API compatibility: the new QR variant require updates to downstream
+constructors or exhaustive matches. This is separate from existing PTL file
+compatibility; older flow files remain supported.
+
 ### QR editor
 
 Use **Add QR** to create an editable element, or open a version 2 QR layout.

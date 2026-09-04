@@ -144,7 +144,15 @@ fn do_save_layout(state: &mut AppState) {
     }
 
     let document = LabelDocument {
-        version: ptouch_render::document::DOCUMENT_VERSION,
+        version: if state
+            .elements
+            .iter()
+            .any(|element| matches!(element, LabelElement::QrCode { .. }))
+        {
+            2
+        } else {
+            1
+        },
         tape_width_mm: state.tape_width_mm,
         dpi: state.printer_dpi,
         font_name: state.font_name.clone(),
