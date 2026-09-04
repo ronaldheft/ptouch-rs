@@ -23,7 +23,7 @@ use crate::image_loader::{self, ImageLoadOptions};
 use crate::text::{TextAlign, TextRenderer};
 
 /// Current on-disk layout format version.
-pub const DOCUMENT_VERSION: u32 = 1;
+pub const DOCUMENT_VERSION: u32 = 2;
 
 /// Default design resolution for layouts saved before the dpi field existed.
 fn default_dpi() -> u16 {
@@ -76,6 +76,16 @@ impl LabelDocument {
                 doc.version, DOCUMENT_VERSION
             )));
         }
+        if doc.version < 2
+            && doc
+                .elements
+                .iter()
+                .any(|element| matches!(element, LabelElement::QrCode { .. }))
+        {
+            return Err(RenderError::Layout(
+                "QR code elements require layout version 2".into(),
+            ));
+        }
         doc.decode_image_caches()?;
         Ok(doc)
     }
@@ -108,7 +118,9 @@ impl LabelDocument {
     pub fn placeholders(&self) -> Vec<String> {
         let mut names = BTreeSet::new();
         for element in &self.elements {
-            if let LabelElement::Text { content, .. } = element {
+            if let LabelElement::Text { content, .. } | LabelElement::QrCode { content, .. } =
+                element
+            {
                 collect_placeholder_names(content, &mut names);
             }
         }
@@ -122,7 +134,9 @@ impl LabelDocument {
     /// [`LabelDocument::placeholders`] against the provided keys first.
     pub fn apply_values(&mut self, values: &BTreeMap<String, String>) {
         for element in &mut self.elements {
-            if let LabelElement::Text { content, .. } = element {
+            if let LabelElement::Text { content, .. } | LabelElement::QrCode { content, .. } =
+                element
+            {
                 *content = substitute_placeholders(content, |name| values.get(name).cloned());
             }
         }
@@ -179,6 +193,43 @@ fn substitute_placeholders(content: &str, lookup: impl Fn(&str) -> Option<String
     result
 }
 
+/// Error-correction level for a semantic QR-code element.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QrErrorCorrection {
+    /// Approximately 7% of codewords can be restored.
+    #[serde(rename = "l")]
+    Low,
+    /// Approximately 15% of codewords can be restored.
+    #[default]
+    #[serde(rename = "m")]
+    Medium,
+    /// Approximately 25% of codewords can be restored.
+    #[serde(rename = "q")]
+    Quartile,
+    /// Approximately 30% of codewords can be restored.
+    #[serde(rename = "h")]
+    High,
+}
+
+impl QrErrorCorrection {
+    /// PTL spelling of this correction level.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "l",
+            Self::Medium => "m",
+            Self::Quartile => "q",
+            Self::High => "h",
+        }
+    }
+}
+
+fn default_qr_min_module_size() -> u32 {
+    1
+}
+fn is_one(value: &u32) -> bool {
+    *value == 1
+}
+
 /// A single element in the label composition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -227,6 +278,20 @@ pub enum LabelElement {
         /// own bitmap, before it is composed into the label.
         #[serde(default)]
         flip_v: bool,
+    },
+    /// A QR code generated from semantic content at render time.
+    #[serde(rename = "qr")]
+    QrCode {
+        /// Content encoded in the QR symbol. May contain template placeholders.
+        content: String,
+        /// Width and height of the QR canvas in logical layout pixels.
+        size: u32,
+        /// QR error-correction level.
+        #[serde(default)]
+        error_correction: QrErrorCorrection,
+        /// Smallest allowed square module size in logical pixels.
+        #[serde(default = "default_qr_min_module_size", skip_serializing_if = "is_one")]
+        min_module_size: u32,
     },
     /// A cut mark separator.
     CutMark,
@@ -283,6 +348,7 @@ impl LabelElement {
                     .unwrap_or_else(|| "embedded".to_string());
                 format!("Image: {}", name)
             }
+            LabelElement::QrCode { content, .. } => format!("QR: {content}"),
             LabelElement::CutMark => "Cut Mark".to_string(),
             LabelElement::Padding { pixels } => format!("Padding: {} px", pixels),
         }
@@ -354,6 +420,20 @@ pub fn render_elements(
                 Some(seg) => seg.mirrored(*flip_h, *flip_v),
                 None => continue,
             },
+            LabelElement::QrCode {
+                content,
+                size,
+                error_correction,
+                min_module_size,
+            } => {
+                if *size > tape_width_px {
+                    return Err(RenderError::Layout(
+                        "QR canvas exceeds printable height".into(),
+                    ));
+                }
+                crate::qr::render_qr(content, *error_correction, *size, *min_module_size)?
+                    .fit_height(tape_width_px)
+            }
             LabelElement::CutMark => compose::cutmark(tape_width_px),
             LabelElement::Padding { pixels } => compose::padding(tape_width_px, *pixels),
         };
@@ -935,5 +1015,58 @@ mod tests {
             }
             _ => panic!("expected image element"),
         }
+    }
+    #[test]
+    fn semantic_qr_parses_and_participates_in_template_substitution() {
+        let text = r#"
+version = 2
+tape_width_mm = 24
+font_name = "sans-serif"
+font_margin = 0
+
+[[elements]]
+type = "qr"
+content = "https://example.com/returns/{{id}}"
+size = 120
+error_correction = "q"
+min_module_size = 2
+"#;
+
+        let mut document = LabelDocument::from_toml_str(text).unwrap();
+        assert_eq!(document.placeholders(), vec!["id".to_string()]);
+        document.apply_values(&BTreeMap::from([("id".to_string(), "ABC-123".to_string())]));
+
+        match &document.elements[0] {
+            LabelElement::QrCode {
+                content,
+                size,
+                error_correction,
+                min_module_size,
+            } => {
+                assert_eq!(content, "https://example.com/returns/ABC-123");
+                assert_eq!(*size, 120);
+                assert_eq!(*error_correction, QrErrorCorrection::Quartile);
+                assert_eq!(*min_module_size, 2);
+            }
+            _ => panic!("expected QR code element"),
+        }
+    }
+
+    #[test]
+    fn semantic_qr_requires_version_two() {
+        let text = r#"
+version = 1
+tape_width_mm = 24
+font_name = "sans-serif"
+font_margin = 0
+
+[[elements]]
+type = "qr"
+content = "hello"
+size = 120
+"#;
+
+        let error = LabelDocument::from_toml_str(text).unwrap_err();
+        assert!(error.to_string().contains("require layout version 2"));
     }
 }

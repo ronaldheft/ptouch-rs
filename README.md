@@ -283,3 +283,29 @@ The MIT-licensed files are reusable on their own under the MIT license (see
 [LICENSE-MIT](LICENSE-MIT)). Any program that links `ptouch-core`, including the
 binaries in this repository, is covered by the GPLv3. See [NOTICE](NOTICE) for
 attribution details.
+
+## Semantic QR layouts
+
+Version 2 layouts support QR elements whose content participates in `--set`,
+`--csv` and `--list-vars` substitution just like text. No source bitmap is
+embedded, so changing a value regenerates the QR rather than leaving stale
+image data.
+
+```toml
+[[elements]]
+type = "qr"
+content = "{{inventory_url}}"
+size = 116
+error_correction = "m"
+min_module_size = 2
+```
+
+Place the element in a version 2 flow document. The canvas includes a
+four-module quiet zone and uses the largest whole-pixel module size that fits.
+A canvas that cannot meet `min_module_size`, or exceeds printable height,
+returns an error instead of squeezing the symbol. Error correction accepts
+`l`, `m` (default), `q`, or `h`. Version 1 layouts remain readable.
+
+This core change renders imported QR layouts in the GUI, but the QR editing
+controls are a separate contribution. Positioning and native target rendering
+are independent enhancements.
