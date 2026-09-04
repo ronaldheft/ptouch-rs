@@ -7,6 +7,7 @@ use log::{error, info};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
+use ptouch_render::document::FontSizeUnit;
 use ptouch_render::image_loader;
 use ptouch_render::text::TextAlign;
 
@@ -31,6 +32,9 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
 
     match &mut element {
         LabelElement::Text {
+            font_name,
+            font_weight,
+            font_size_unit,
             content,
             font_size,
             align,
@@ -39,6 +43,7 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
             flip_v,
             ..
         } => {
+            changed |= show_typography(ui, font_name, font_weight, font_size_unit, state);
             changed |= show_text_properties(
                 ui,
                 TextProps {
@@ -496,5 +501,64 @@ fn show_padding_properties(ui: &mut egui::Ui, pixels: &mut u32) -> bool {
         }
     });
 
+    changed
+}
+
+/// Element overrides leave the existing document defaults available below.
+fn show_typography(
+    ui: &mut egui::Ui,
+    family: &mut Option<String>,
+    weight: &mut Option<u16>,
+    unit: &mut Option<FontSizeUnit>,
+    state: &AppState,
+) -> bool {
+    let mut changed = false;
+    let mut inherit = family.is_none();
+    if ui.checkbox(&mut inherit, "Use document font").changed() {
+        *family = if inherit {
+            None
+        } else {
+            Some(state.font_name.clone())
+        };
+        changed = true;
+    }
+    if let Some(family) = family {
+        egui::ComboBox::from_label("Element font")
+            .selected_text(family.as_str())
+            .show_ui(ui, |ui| {
+                for font in &state.available_fonts {
+                    changed |= ui.selectable_value(family, font.clone(), font).changed();
+                }
+            });
+    }
+    let mut value = weight.unwrap_or(400);
+    ui.horizontal(|ui| {
+        ui.label("Element weight:");
+        if ui
+            .add(egui::DragValue::new(&mut value).speed(100).range(1..=1000))
+            .changed()
+        {
+            *weight = Some(value);
+            changed = true;
+        }
+    });
+    egui::ComboBox::from_label("Size unit")
+        .selected_text(match unit {
+            None => "Legacy flow size",
+            Some(FontSizeUnit::Points) => "pt",
+            Some(FontSizeUnit::Pixels) => "px",
+        })
+        .show_ui(ui, |ui| {
+            changed |= ui
+                .selectable_value(unit, None, "Legacy flow size")
+                .changed();
+            changed |= ui
+                .selectable_value(unit, Some(FontSizeUnit::Points), "pt")
+                .changed();
+            changed |= ui
+                .selectable_value(unit, Some(FontSizeUnit::Pixels), "px")
+                .changed();
+        });
+    ui.separator();
     changed
 }

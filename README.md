@@ -312,3 +312,10 @@ fields when the GUI opens and saves a layout; editing controls are separate.
 Rust API compatibility: Text variant fields require updates to downstream
 constructors or exhaustive matches. This is separate from existing PTL file
 compatibility; older flow files remain supported.
+
+### Typography editor
+
+Text properties provide **Use document font**, an element font selector,
+weight and explicit size units. The existing document font remains editable
+as the inherited default. Untouched legacy text keeps its original sizing;
+choosing an explicit unit changes that element only.
