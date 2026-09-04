@@ -6,7 +6,9 @@
 //! Renders multi-line text into a [`LabelBitmap`] using system fonts.
 //! Supports auto-sizing, alignment, and font selection.
 
-use cosmic_text::{Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache};
+use cosmic_text::{
+    Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Weight,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::RenderError;
@@ -81,6 +83,28 @@ impl TextRenderer {
         font_margin: u32,
         align: TextAlign,
     ) -> Result<LabelBitmap> {
+        self.render_text_weighted(
+            lines,
+            print_width,
+            (font_name, 400),
+            font_size,
+            font_margin,
+            align,
+        )
+    }
+
+    /// Render a text element with an independent family and CSS-style weight.
+    /// Existing callers of `render_text` retain the regular-weight default.
+    pub fn render_text_weighted(
+        &mut self,
+        lines: &[&str],
+        print_width: u32,
+        font: (&str, u16),
+        font_size: Option<f32>,
+        font_margin: u32,
+        align: TextAlign,
+    ) -> Result<LabelBitmap> {
+        let (font_name, font_weight) = font;
         if print_width == 0 {
             return Err(RenderError::Text("print_width must be > 0".into()));
         }
@@ -115,7 +139,9 @@ impl TextRenderer {
         } else {
             Family::Name(font_name)
         };
-        let attrs = Attrs::new().family(family);
+        let attrs = Attrs::new()
+            .family(family)
+            .weight(Weight(font_weight.clamp(1, 1000)));
         let cosmic_align = Some(align.to_cosmic());
 
         // We do not know the final horizontal width yet. Use a large initial

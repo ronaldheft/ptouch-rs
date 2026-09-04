@@ -30,6 +30,18 @@ fn default_dpi() -> u16 {
     180
 }
 
+/// Unit used by an explicitly sized text element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FontSizeUnit {
+    /// Typographic points (1/72 inch).
+    #[serde(rename = "pt")]
+    Points,
+    /// Logical layout pixels.
+    #[serde(rename = "px")]
+    Pixels,
+}
+
 /// A complete label design: global settings plus an ordered element list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LabelDocument {
@@ -187,9 +199,18 @@ pub enum LabelElement {
     Text {
         /// Text content; newlines separate lines.
         content: String,
+        /// Font family override. `None` inherits the document font.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font_name: Option<String>,
+        /// CSS-style font weight from 1 through 1000. `None` means regular.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font_weight: Option<u16>,
         /// Explicit font size in points. `None` means auto-fit to tape height.
         #[serde(skip_serializing_if = "Option::is_none")]
         font_size: Option<f32>,
+        /// Unit for `font_size`. Positioned text defaults to points when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font_size_unit: Option<FontSizeUnit>,
         /// Horizontal alignment of the text block.
         align: TextAlign,
         /// Rotation angle in degrees (clockwise). 0.0 = horizontal.
@@ -295,6 +316,7 @@ struct FontSettings<'a> {
     name: &'a str,
     /// Top/bottom margin in pixels.
     margin: u32,
+    weight: u16,
 }
 
 /// Render an ordered element list into a single label bitmap.
@@ -310,6 +332,30 @@ pub fn render_elements(
     font_margin: u32,
     renderer: &mut TextRenderer,
 ) -> Result<Option<LabelBitmap>> {
+    render_elements_at_dpi(
+        elements,
+        tape_width_px,
+        font_name,
+        font_margin,
+        180,
+        renderer,
+    )
+}
+
+/// Render flow elements with explicit font units resolved at the document DPI.
+pub fn render_elements_at_dpi(
+    elements: &[LabelElement],
+    tape_width_px: u32,
+    font_name: &str,
+    font_margin: u32,
+    dpi: u16,
+    renderer: &mut TextRenderer,
+) -> Result<Option<LabelBitmap>> {
+    if dpi == 0 {
+        return Err(RenderError::Layout(
+            "document DPI must be greater than zero".into(),
+        ));
+    }
     let mut result: Option<LabelBitmap> = None;
 
     for element in elements {
@@ -317,6 +363,9 @@ pub fn render_elements(
             LabelElement::Text {
                 content,
                 font_size,
+                font_name: element_font,
+                font_weight,
+                font_size_unit,
                 align,
                 rotation,
                 flip_h,
@@ -324,13 +373,17 @@ pub fn render_elements(
             } => match render_text_segment(
                 renderer,
                 content,
-                *font_size,
+                font_size.map(|size| match font_size_unit {
+                    Some(FontSizeUnit::Points) => size * f32::from(dpi) / 72.0,
+                    Some(FontSizeUnit::Pixels) | None => size,
+                }),
                 *align,
                 *rotation,
                 tape_width_px,
                 &FontSettings {
-                    name: font_name,
+                    name: element_font.as_deref().unwrap_or(font_name),
                     margin: font_margin,
+                    weight: font_weight.unwrap_or(400),
                 },
             ) {
                 Some(seg) => seg.mirrored(*flip_h, *flip_v),
@@ -401,10 +454,10 @@ fn render_text_segment(
         tape_width_px
     };
 
-    let bmp = match renderer.render_text(
+    let bmp = match renderer.render_text_weighted(
         &lines,
         render_height,
-        font.name,
+        (font.name, font.weight),
         effective_font_size,
         font.margin,
         align,
@@ -692,6 +745,9 @@ mod tests {
         let elements = vec![LabelElement::Text {
             content: String::new(),
             font_size: Some(24.0),
+            font_name: None,
+            font_weight: None,
+            font_size_unit: None,
             align: TextAlign::Left,
             rotation: 0.0,
             flip_h: false,
@@ -753,6 +809,9 @@ mod tests {
                 LabelElement::Text {
                     content: "Hi".into(),
                     font_size: Some(24.0),
+                    font_name: None,
+                    font_weight: None,
+                    font_size_unit: None,
                     align: TextAlign::Center,
                     rotation: 0.0,
                     flip_h: false,
@@ -860,6 +919,9 @@ mod tests {
             elements: vec![LabelElement::Text {
                 content: content.into(),
                 font_size: Some(24.0),
+                font_name: None,
+                font_weight: None,
+                font_size_unit: None,
                 align: TextAlign::Left,
                 rotation: 0.0,
                 flip_h: false,
@@ -935,5 +997,38 @@ mod tests {
             }
             _ => panic!("expected image element"),
         }
+    }
+    #[test]
+    fn explicit_points_and_pixels_resolve_to_the_same_flow_raster() {
+        let base = "version = 1\ntape_width_mm = 24\ndpi = 180\nfont_name = \"sans-serif\"\nfont_margin = 0\n[[elements]]\ntype = \"text\"\ncontent = \"Sample\"\nalign = \"left\"\nrotation = 0\n";
+        let points = LabelDocument::from_toml_str(&format!(
+            "{base}font_size = 8\nfont_size_unit = \"pt\"\nfont_weight = 700\n"
+        ))
+        .unwrap();
+        let pixels = LabelDocument::from_toml_str(&format!(
+            "{base}font_size = 20\nfont_size_unit = \"px\"\nfont_weight = 700\n"
+        ))
+        .unwrap();
+        let mut renderer = TextRenderer::new();
+        let render = |doc: &LabelDocument, renderer: &mut TextRenderer| {
+            render_elements_at_dpi(&doc.elements, 128, &doc.font_name, 0, doc.dpi, renderer)
+                .unwrap()
+                .unwrap()
+        };
+        let a = render(&points, &mut renderer);
+        let b = render(&pixels, &mut renderer);
+        assert_eq!(
+            (a.width(), a.height(), a.data()),
+            (b.width(), b.height(), b.data())
+        );
+        let roundtrip = LabelDocument::from_toml_str(&points.to_toml_string().unwrap()).unwrap();
+        assert!(matches!(
+            &roundtrip.elements[0],
+            LabelElement::Text {
+                font_weight: Some(700),
+                font_size_unit: Some(FontSizeUnit::Points),
+                ..
+            }
+        ));
     }
 }

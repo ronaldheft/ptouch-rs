@@ -60,11 +60,12 @@ impl PtouchApp {
             return;
         }
 
-        let result = match ptouch_render::document::render_elements(
+        let result = match ptouch_render::document::render_elements_at_dpi(
             &self.state.elements,
             self.state.tape_width_px,
             &self.state.font_name,
             self.state.font_margin,
+            self.state.layout_dpi,
             &mut self.renderer,
         ) {
             Ok(result) => result,
