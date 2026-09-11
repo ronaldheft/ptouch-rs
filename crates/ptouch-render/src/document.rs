@@ -58,6 +58,10 @@ fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
+fn default_qr_quiet_zone_modules() -> u32 {
+    4
+}
+
 fn default_qr_min_module_size() -> u32 {
     1
 }
@@ -92,6 +96,9 @@ pub struct LabelDocument {
     /// Blank space after the rightmost positioned element, in logical pixels.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub end_padding: u32,
+    /// Equalize blank columns before/after actual ink, adding space only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub balance_horizontal_margins: bool,
     /// Font family name used for text elements.
     pub font_name: String,
     /// Font top/bottom margin in pixels.
@@ -382,6 +389,10 @@ pub enum LabelElement {
         /// Smallest allowed square module size in logical pixels.
         #[serde(default = "default_qr_min_module_size", skip_serializing_if = "is_one")]
         min_module_size: u32,
+        /// Quiet-zone modules included inside the canvas (default four).
+        /// Smaller values require the surrounding label/tape to supply the rest.
+        #[serde(default = "default_qr_quiet_zone_modules")]
+        quiet_zone_modules: u32,
     },
     /// A cut mark separator.
     CutMark,
@@ -553,6 +564,7 @@ pub fn render_elements_at_dpi(
                 size,
                 error_correction,
                 min_module_size,
+                quiet_zone_modules,
                 ..
             } => {
                 if *size > tape_width_px {
@@ -560,8 +572,14 @@ pub fn render_elements_at_dpi(
                         "QR canvas exceeds printable height".into(),
                     ));
                 }
-                crate::qr::render_qr(content, *error_correction, *size, *min_module_size)?
-                    .fit_height(tape_width_px)
+                crate::qr::render_qr_with_quiet_zone(
+                    content,
+                    *error_correction,
+                    *size,
+                    *min_module_size,
+                    *quiet_zone_modules,
+                )?
+                .fit_height(tape_width_px)
             }
             LabelElement::CutMark => compose::cutmark(tape_width_px),
             LabelElement::Padding { pixels } => compose::padding(tape_width_px, *pixels),
@@ -968,6 +986,7 @@ mod tests {
             layout: LayoutMode::Flow,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "DejaVuSans".into(),
             font_margin: 2,
             flip_h: false,
@@ -1037,6 +1056,7 @@ mod tests {
             layout: LayoutMode::Flow,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "x".into(),
             font_margin: 0,
             flip_h: false,
@@ -1143,6 +1163,7 @@ elements = []
             layout: LayoutMode::Flow,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "x".into(),
             font_margin: 0,
             flip_h: false,
@@ -1180,6 +1201,7 @@ elements = []
             layout: LayoutMode::Flow,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "x".into(),
             font_margin: 0,
             flip_h: false,
@@ -1297,12 +1319,14 @@ min_module_size = 2
                 size,
                 error_correction,
                 min_module_size,
+                quiet_zone_modules,
             } => {
                 assert_eq!(content, "https://example.com/returns/ABC-123");
                 assert_eq!((*x, *y), (None, None));
                 assert_eq!(*size, 120);
                 assert_eq!(*error_correction, QrErrorCorrection::Quartile);
                 assert_eq!(*min_module_size, 2);
+                assert_eq!(*quiet_zone_modules, 4);
             }
             _ => panic!("expected QR code element"),
         }
@@ -1369,6 +1393,7 @@ size = 120
             size: 58,
             error_correction: QrErrorCorrection::Low,
             min_module_size: 2,
+            quiet_zone_modules: 4,
         });
         assert!(document.to_toml_string().is_err());
     }

@@ -376,6 +376,17 @@ pub fn build_print_job(lines: &[Vec<u8>], flags: DeviceFlags, opts: &JobOptions)
         job.push(cmd_precut(true));
     }
 
+    // PT-P710BT: explicitly select the symmetric 2 mm feed margin when
+    // Auto Cut is enabled (Brother raster reference, sections 2.3.3 and 4).
+    // Margin units follow feed resolution, so high quality needs 28 dots.
+    if flags.contains(DeviceFlags::FEED_HIRES) && opts.precut {
+        job.push(cmd_page_flags(if quality == PrintQuality::HighRes {
+            28
+        } else {
+            14
+        }));
+    }
+
     if is_d460bt && opts.chain_print {
         job.push(cmd_d460bt_chain());
     }
@@ -707,6 +718,30 @@ mod tests {
         ]
         .concat();
         assert_eq!(flat(&job), expected);
+    }
+
+    #[test]
+    fn p710bt_autocut_sets_symmetric_feed_margin_for_every_page() {
+        let flags = DeviceFlags::FEED_HIRES | DeviceFlags::HAS_PRECUT;
+        for (quality, margin) in [(PrintQuality::Standard, 14), (PrintQuality::HighRes, 28)] {
+            for chain_print in [false, true] {
+                let opts = JobOptions {
+                    precut: true,
+                    quality,
+                    chain_print,
+                    ..JobOptions::default()
+                };
+                let job = build_print_job(&[vec![0xAA]], flags, &opts);
+                assert!(job.contains(&cmd_page_flags(margin)));
+                assert!(job.contains(&cmd_precut(true)));
+            }
+        }
+        let opts = JobOptions {
+            precut: true,
+            ..JobOptions::default()
+        };
+        let legacy = build_print_job(&[vec![0xAA]], DeviceFlags::HAS_PRECUT, &opts);
+        assert!(!legacy.contains(&cmd_page_flags(14)));
     }
 
     #[test]

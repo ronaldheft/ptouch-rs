@@ -9,8 +9,6 @@ use crate::bitmap::LabelBitmap;
 use crate::document::QrErrorCorrection;
 use crate::{RenderError, Result};
 
-const QUIET_ZONE_MODULES: u32 = 4;
-
 /// Encode `content` and render square modules into a `size`-pixel canvas.
 ///
 /// The largest whole-number module size that fits is used. Any remaining
@@ -22,6 +20,23 @@ pub fn render_qr(
     size: u32,
     min_module_size: u32,
 ) -> Result<LabelBitmap> {
+    render_qr_with_quiet_zone(content, error_correction, size, min_module_size, 4)
+}
+
+/// Render a QR with an explicit internal quiet zone. The caller must provide
+/// any omitted modules as blank space outside the bitmap.
+pub fn render_qr_with_quiet_zone(
+    content: &str,
+    error_correction: QrErrorCorrection,
+    size: u32,
+    min_module_size: u32,
+    quiet_zone_modules: u32,
+) -> Result<LabelBitmap> {
+    if quiet_zone_modules > 4 {
+        return Err(RenderError::Layout(
+            "QR quiet_zone_modules must be between 0 and 4".into(),
+        ));
+    }
     if content.is_empty() {
         return Err(RenderError::Layout(
             "QR code content cannot be empty".to_string(),
@@ -42,7 +57,7 @@ pub fn render_qr(
         .map_err(|error| RenderError::Layout(format!("QR code encoding failed: {error}")))?;
     let symbol_width = u32::try_from(code.width())
         .map_err(|_| RenderError::Layout("QR code dimensions are too large".to_string()))?;
-    let total_modules = symbol_width + QUIET_ZONE_MODULES * 2;
+    let total_modules = symbol_width + quiet_zone_modules * 2;
     let module_size = size / total_modules;
     if module_size < min_module_size {
         let required_size = total_modules.checked_mul(min_module_size).ok_or_else(|| {
@@ -55,7 +70,7 @@ pub fn render_qr(
 
     let rendered_size = total_modules * module_size;
     let outer_padding = (size - rendered_size) / 2;
-    let symbol_origin = outer_padding + QUIET_ZONE_MODULES * module_size;
+    let symbol_origin = outer_padding + quiet_zone_modules * module_size;
     let mut bitmap = LabelBitmap::new(size, size);
 
     for module_y in 0..symbol_width {
@@ -102,6 +117,13 @@ mod tests {
         assert!(bitmap.get_pixel(8, 8));
         assert!(bitmap.get_pixel(9, 9));
         assert!(!bitmap.get_pixel(10, 10));
+    }
+
+    #[test]
+    fn qr_rejects_invalid_quiet_zone_without_overflow() {
+        assert!(
+            render_qr_with_quiet_zone("HELLO", QrErrorCorrection::Low, 128, 1, u32::MAX).is_err()
+        );
     }
 
     #[test]

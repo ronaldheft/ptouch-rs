@@ -67,6 +67,8 @@ pub struct AppState {
     pub min_length: u32,
     /// Blank space after the rightmost positioned element.
     pub end_padding: u32,
+    /// Balance leading/trailing blank space around rendered ink.
+    pub balance_horizontal_margins: bool,
     /// Font name used for text rendering.
     pub font_name: String,
     /// Font top/bottom margin in pixels.
@@ -132,6 +134,7 @@ impl Default for AppState {
             layout: LayoutMode::Flow,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "DejaVuSans".to_string(),
             font_margin: 0,
             overall_flip_h: false,
@@ -192,6 +195,7 @@ impl AppState {
             layout: self.layout,
             min_length: self.min_length,
             end_padding: self.end_padding,
+            balance_horizontal_margins: self.balance_horizontal_margins,
             font_name: self.font_name.clone(),
             font_margin: self.font_margin,
             flip_h: self.overall_flip_h,
@@ -207,6 +211,7 @@ impl AppState {
         self.layout = document.layout;
         self.min_length = document.min_length;
         self.end_padding = document.end_padding;
+        self.balance_horizontal_margins = document.balance_horizontal_margins;
         self.font_name = document.font_name;
         self.font_margin = document.font_margin;
         self.overall_flip_h = document.flip_h;
@@ -269,6 +274,7 @@ mod tests {
             layout: LayoutMode::Positioned,
             min_length: 230,
             end_padding: 3,
+            balance_horizontal_margins: true,
             ..AppState::default()
         };
         for (index, weight) in [700, 300, 500, 800].into_iter().enumerate() {
@@ -306,6 +312,7 @@ mod tests {
         assert_eq!(restored.layout, LayoutMode::Positioned);
         assert_eq!(restored.min_length, 230);
         assert_eq!(restored.end_padding, 3);
+        assert!(restored.balance_horizontal_margins);
         match &restored.elements[0] {
             LabelElement::Text {
                 x,

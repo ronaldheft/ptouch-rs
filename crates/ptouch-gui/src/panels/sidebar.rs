@@ -107,6 +107,12 @@ fn show_layout_section(ui: &mut egui::Ui, state: &mut AppState) {
                 .changed();
             ui.label("px");
         });
+        changed |= ui
+            .checkbox(
+                &mut state.balance_horizontal_margins,
+                "Equal start/end margins",
+            )
+            .changed();
         if changed {
             state.mark_dirty();
         }

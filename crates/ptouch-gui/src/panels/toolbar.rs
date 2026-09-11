@@ -46,6 +46,7 @@ pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
                 size: state.tape_width_px,
                 error_correction: ptouch_render::document::QrErrorCorrection::Medium,
                 min_module_size: 1,
+                quiet_zone_modules: 4,
             });
             state.selected_element = Some(state.elements.len() - 1);
             state.mark_dirty();

@@ -195,9 +195,34 @@ within that actual raster. An element may end exactly at the printable edge,
 but rendering fails with a layout error if its bottom edge would be clipped.
 High-quality feed-axis scaling does not change this cross-tape limit.
 
+For layout PNG exports, `--preview-tape-margins` includes the nominal tape's
+blank top and bottom edges. On 24 mm tape, this produces 170/340-pixel-high
+standard/high previews while leaving the 128-dot print raster untouched. It
+requires `--layout` and `--output` and supports CSV exports. Add
+`--preview-feed-margin-mm 2` to include 2 mm of blank feed at each end, matching
+PT-P710BT Auto Cut. The feed amount is explicit (0–127 mm, default 0) because
+it must match the intended print settings. Saved dimensions and length include
+these preview margins; no extra pixels are sent to the printer. Default exports
+and the GUI canvas remain unchanged.
+
+Positioned layouts can opt into `balance_horizontal_margins = true`. After
+rasterization, the shorter horizontal ink-to-edge margin is padded to match
+the longer one. Existing minimum length and end padding remain minimums; no
+content is cropped or rescaled. This is measured from actual ink, including
+font side bearings. The GUI preserves and edits the setting. Target rounding
+can change balanced label length by a feed dot between print qualities.
+PT-P710BT Auto Cut jobs explicitly select symmetric 2 mm feed margins
+(14 standard / 28 high-resolution dots), including chained pages, as documented
+in sections 2.3.3 and ESC i d of Brother's raster reference.
+
+
 Version 2 layouts can generate QR codes directly from literal or templated
 content. `size` is the square logical-pixel canvas, including the required
-four-module quiet zone. Modules always use an integer number of pixels and are
+four-module quiet zone by default. `quiet_zone_modules = 0..4` controls how much
+of that border is inside the canvas; reduce it only when the surrounding label
+or physical blank tape edges supply the remaining white space. The raster
+preview does not include unprintable tape margins. The GUI preserves and edits
+this setting. Modules always use an integer number of pixels and are
 centered when the canvas has extra space. Error correction accepts `l`, `m`,
 `q`, or `h` and defaults to `m`. Set `min_module_size` when a printer or
 scanner requires more than the default one logical pixel per module.
