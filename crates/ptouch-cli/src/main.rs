@@ -25,7 +25,7 @@ use ptouch_core::transport::PtouchDevice;
 use ptouch_render::bitmap::LabelBitmap;
 use ptouch_render::document::{LabelDocument, LabelElement, LayoutMode};
 use ptouch_render::image_loader;
-use ptouch_render::layout::{RenderTarget, render_document};
+use ptouch_render::layout::{RenderTarget, RenderedLabel, render_document};
 use ptouch_render::raster;
 use ptouch_render::text::TextAlign;
 
@@ -95,6 +95,10 @@ struct PrintArgs {
     /// Export to PNG file instead of printing
     #[arg(short = 'o', long)]
     output: Option<String>,
+
+    /// Include blank top/bottom tape edges in layout preview exports
+    #[arg(long, requires_all = ["layout", "output"])]
+    preview_tape_margins: bool,
 
     /// Font name
     #[arg(short = 'f', long, default_value = "DejaVuSans")]
@@ -584,7 +588,10 @@ fn print_layout(args: &PrintArgs, layout_path: &str) -> Result<(), Box<dyn std::
 
     let (print_width, max_px, mut device) = resolve_layout_target(args, &doc)?;
     let target = layout_target(args, &doc, print_width, device.as_ref());
-    let rendered = render_document(&doc, target)?;
+    let mut rendered = render_document(&doc, target)?;
+    if args.preview_tape_margins {
+        include_tape_margins(&mut rendered, doc.tape_width_mm, target)?;
+    }
     emit_label(
         &rendered.printer_raster,
         &rendered.preview,
@@ -640,7 +647,10 @@ fn print_layout_batch(
         let mut row_doc = doc.clone();
         row_doc.apply_values(&values);
         let target = layout_target(args, &row_doc, print_width, device.as_ref());
-        let rendered = render_document(&row_doc, target)?;
+        let mut rendered = render_document(&row_doc, target)?;
+        if args.preview_tape_margins {
+            include_tape_margins(&mut rendered, row_doc.tape_width_mm, target)?;
+        }
 
         count += 1;
         if let Some(output) = &args.output {
@@ -743,6 +753,29 @@ fn resolve_layout_target(
         let max = dev.max_px();
         Ok((printer_px, max, Some(dev)))
     }
+}
+
+/// Frame only the exported square-pixel preview in the full nominal tape
+/// height. The raster sent to the printer is deliberately untouched.
+fn include_tape_margins(
+    rendered: &mut RenderedLabel,
+    tape_width_mm: u8,
+    target: RenderTarget,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let height = (f64::from(tape_width_mm) * f64::from(target.feed_dpi) / 25.4).round() as u32;
+    let preview = &rendered.preview;
+    if height < preview.height() {
+        return Err("nominal tape width is smaller than the printable preview".into());
+    }
+    let top = (height - preview.height()) / 2;
+    let mut framed = LabelBitmap::new(preview.width(), height);
+    for y in 0..preview.height() {
+        for x in 0..preview.width() {
+            framed.set_pixel(x, y + top, preview.get_pixel(x, y));
+        }
+    }
+    rendered.preview = framed;
+    Ok(())
 }
 
 /// Save a rendered label to an image file or print it to the device.
@@ -961,6 +994,94 @@ mod tests {
         assert_eq!(values.get("name").map(String::as_str), Some("Alice"));
         // Only the first '=' splits, so values may contain '='.
         assert_eq!(values.get("id").map(String::as_str), Some("A=1"));
+    }
+
+    #[test]
+    fn tape_preview_adds_blank_edges_without_changing_print_raster() {
+        let doc = LabelDocument::from_toml_str(
+            r#"
+version = 2
+tape_width_mm = 24
+font_name = "sans-serif"
+font_margin = 0
+layout = "positioned"
+[[elements]]
+type = "qr"
+content = "HELLO"
+x = 0
+y = 0
+size = 128
+"#,
+        )
+        .unwrap();
+        for feed_dpi in [180, 360] {
+            let target = RenderTarget {
+                tape_width_px: 128,
+                cross_dpi: 180,
+                feed_dpi,
+            };
+            let mut rendered = render_document(&doc, target).unwrap();
+            let raster_before = rendered.printer_raster.clone();
+            let preview_before = rendered.preview.clone();
+            include_tape_margins(&mut rendered, 24, target).unwrap();
+            let scale = u32::from(feed_dpi / 180);
+            assert_eq!(rendered.preview.height(), 170 * scale);
+            let top = 21 * scale;
+            for y in 0..rendered.preview.height() {
+                for x in 0..rendered.preview.width() {
+                    let expected = y >= top
+                        && y < top + preview_before.height()
+                        && preview_before.get_pixel(x, y - top);
+                    assert_eq!(rendered.preview.get_pixel(x, y), expected);
+                }
+            }
+            for y in 0..raster_before.height() {
+                for x in 0..raster_before.width() {
+                    assert_eq!(
+                        rendered.printer_raster.get_pixel(x, y),
+                        raster_before.get_pixel(x, y)
+                    );
+                }
+            }
+            assert_eq!(rendered.printer_raster.height(), 128);
+        }
+    }
+
+    #[test]
+    fn tape_preview_flag_requires_layout_and_export() {
+        assert!(
+            Cli::try_parse_from([
+                "ptouch",
+                "print",
+                "--layout",
+                "label.ptl",
+                "--preview-tape-margins"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "ptouch",
+                "print",
+                "Hello",
+                "--output",
+                "out.png",
+                "--preview-tape-margins"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "ptouch",
+                "print",
+                "--layout",
+                "label.ptl",
+                "--output",
+                "out.png",
+                "--preview-tape-margins"
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

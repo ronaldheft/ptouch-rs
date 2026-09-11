@@ -195,6 +195,12 @@ within that actual raster. An element may end exactly at the printable edge,
 but rendering fails with a layout error if its bottom edge would be clipped.
 High-quality feed-axis scaling does not change this cross-tape limit.
 
+For layout PNG exports, `--preview-tape-margins` includes the nominal tape's
+blank top and bottom edges. On 24 mm tape, this produces 170/340-pixel-high
+standard/high previews while leaving the 128-dot print raster untouched. It
+requires `--layout` and `--output`, supports CSV exports, and does not add
+horizontal feed margins. Default exports and the GUI canvas remain unchanged.
+
 Positioned layouts can opt into `balance_horizontal_margins = true`. After
 rasterization, the shorter horizontal ink-to-edge margin is padded to match
 the longer one. Existing minimum length and end padding remain minimums; no
