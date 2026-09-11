@@ -100,6 +100,10 @@ struct PrintArgs {
     #[arg(long, requires_all = ["layout", "output"])]
     preview_tape_margins: bool,
 
+    /// Physical feed margin at each end of a tape preview, in mm (export only)
+    #[arg(long, default_value_t = 0.0, requires = "preview_tape_margins")]
+    preview_feed_margin_mm: f64,
+
     /// Font name
     #[arg(short = 'f', long, default_value = "DejaVuSans")]
     font: String,
@@ -590,7 +594,12 @@ fn print_layout(args: &PrintArgs, layout_path: &str) -> Result<(), Box<dyn std::
     let target = layout_target(args, &doc, print_width, device.as_ref());
     let mut rendered = render_document(&doc, target)?;
     if args.preview_tape_margins {
-        include_tape_margins(&mut rendered, doc.tape_width_mm, target)?;
+        include_tape_margins(
+            &mut rendered,
+            doc.tape_width_mm,
+            target,
+            args.preview_feed_margin_mm,
+        )?;
     }
     emit_label(
         &rendered.printer_raster,
@@ -649,7 +658,12 @@ fn print_layout_batch(
         let target = layout_target(args, &row_doc, print_width, device.as_ref());
         let mut rendered = render_document(&row_doc, target)?;
         if args.preview_tape_margins {
-            include_tape_margins(&mut rendered, row_doc.tape_width_mm, target)?;
+            include_tape_margins(
+                &mut rendered,
+                row_doc.tape_width_mm,
+                target,
+                args.preview_feed_margin_mm,
+            )?;
         }
 
         count += 1;
@@ -756,22 +770,31 @@ fn resolve_layout_target(
 }
 
 /// Frame only the exported square-pixel preview in the full nominal tape
-/// height. The raster sent to the printer is deliberately untouched.
+/// height plus explicit feed margins. The print raster is untouched.
 fn include_tape_margins(
     rendered: &mut RenderedLabel,
     tape_width_mm: u8,
     target: RenderTarget,
+    feed_margin_mm: f64,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if !feed_margin_mm.is_finite() || !(0.0..=127.0).contains(&feed_margin_mm) {
+        return Err("preview feed margin must be between 0 and 127 mm".into());
+    }
+    let feed = (feed_margin_mm * f64::from(target.feed_dpi) / 25.4).round() as u32;
     let height = (f64::from(tape_width_mm) * f64::from(target.feed_dpi) / 25.4).round() as u32;
     let preview = &rendered.preview;
     if height < preview.height() {
         return Err("nominal tape width is smaller than the printable preview".into());
     }
     let top = (height - preview.height()) / 2;
-    let mut framed = LabelBitmap::new(preview.width(), height);
+    let width = preview
+        .width()
+        .checked_add(feed * 2)
+        .ok_or("preview width is too large")?;
+    let mut framed = LabelBitmap::new(width, height);
     for y in 0..preview.height() {
         for x in 0..preview.width() {
-            framed.set_pixel(x, y + top, preview.get_pixel(x, y));
+            framed.set_pixel(x + feed, y + top, preview.get_pixel(x, y));
         }
     }
     rendered.preview = framed;
@@ -789,7 +812,7 @@ fn emit_label(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref output_path) = args.output {
         preview.save(Path::new(output_path))?;
-        let tape_mm = printer_raster.width() as f64 / f64::from(feed_dpi) * 25.4;
+        let tape_mm = preview.width() as f64 / f64::from(feed_dpi) * 25.4;
         println!(
             "Saved to '{}' ({}x{} px, {:.1} mm of tape)",
             output_path,
@@ -1023,15 +1046,19 @@ size = 128
             let mut rendered = render_document(&doc, target).unwrap();
             let raster_before = rendered.printer_raster.clone();
             let preview_before = rendered.preview.clone();
-            include_tape_margins(&mut rendered, 24, target).unwrap();
+            include_tape_margins(&mut rendered, 24, target, 2.0).unwrap();
             let scale = u32::from(feed_dpi / 180);
             assert_eq!(rendered.preview.height(), 170 * scale);
             let top = 21 * scale;
+            let feed = 14 * scale;
+            assert_eq!(rendered.preview.width(), preview_before.width() + 2 * feed);
             for y in 0..rendered.preview.height() {
                 for x in 0..rendered.preview.width() {
                     let expected = y >= top
                         && y < top + preview_before.height()
-                        && preview_before.get_pixel(x, y - top);
+                        && x >= feed
+                        && x < feed + preview_before.width()
+                        && preview_before.get_pixel(x - feed, y - top);
                     assert_eq!(rendered.preview.get_pixel(x, y), expected);
                 }
             }
