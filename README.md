@@ -197,7 +197,11 @@ High-quality feed-axis scaling does not change this cross-tape limit.
 
 Version 2 layouts can generate QR codes directly from literal or templated
 content. `size` is the square logical-pixel canvas, including the required
-four-module quiet zone. Modules always use an integer number of pixels and are
+four-module quiet zone by default. `quiet_zone_modules = 0..4` controls how much
+of that border is inside the canvas; reduce it only when the surrounding label
+or physical blank tape edges supply the remaining white space. The raster
+preview does not include unprintable tape margins. The GUI preserves and edits
+this setting. Modules always use an integer number of pixels and are
 centered when the canvas has extra space. Error correction accepts `l`, `m`,
 `q`, or `h` and defaults to `m`. Set `min_module_size` when a printer or
 scanner requires more than the default one logical pixel per module.

@@ -58,6 +58,10 @@ fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
+fn default_qr_quiet_zone_modules() -> u32 {
+    4
+}
+
 fn default_qr_min_module_size() -> u32 {
     1
 }
@@ -382,6 +386,10 @@ pub enum LabelElement {
         /// Smallest allowed square module size in logical pixels.
         #[serde(default = "default_qr_min_module_size", skip_serializing_if = "is_one")]
         min_module_size: u32,
+        /// Quiet-zone modules included inside the canvas (default four).
+        /// Smaller values require the surrounding label/tape to supply the rest.
+        #[serde(default = "default_qr_quiet_zone_modules")]
+        quiet_zone_modules: u32,
     },
     /// A cut mark separator.
     CutMark,
@@ -553,6 +561,7 @@ pub fn render_elements_at_dpi(
                 size,
                 error_correction,
                 min_module_size,
+                quiet_zone_modules,
                 ..
             } => {
                 if *size > tape_width_px {
@@ -560,8 +569,14 @@ pub fn render_elements_at_dpi(
                         "QR canvas exceeds printable height".into(),
                     ));
                 }
-                crate::qr::render_qr(content, *error_correction, *size, *min_module_size)?
-                    .fit_height(tape_width_px)
+                crate::qr::render_qr_with_quiet_zone(
+                    content,
+                    *error_correction,
+                    *size,
+                    *min_module_size,
+                    *quiet_zone_modules,
+                )?
+                .fit_height(tape_width_px)
             }
             LabelElement::CutMark => compose::cutmark(tape_width_px),
             LabelElement::Padding { pixels } => compose::padding(tape_width_px, *pixels),
@@ -1297,12 +1312,14 @@ min_module_size = 2
                 size,
                 error_correction,
                 min_module_size,
+                quiet_zone_modules,
             } => {
                 assert_eq!(content, "https://example.com/returns/ABC-123");
                 assert_eq!((*x, *y), (None, None));
                 assert_eq!(*size, 120);
                 assert_eq!(*error_correction, QrErrorCorrection::Quartile);
                 assert_eq!(*min_module_size, 2);
+                assert_eq!(*quiet_zone_modules, 4);
             }
             _ => panic!("expected QR code element"),
         }
@@ -1369,6 +1386,7 @@ size = 120
             size: 58,
             error_correction: QrErrorCorrection::Low,
             min_module_size: 2,
+            quiet_zone_modules: 4,
         });
         assert!(document.to_toml_string().is_err());
     }

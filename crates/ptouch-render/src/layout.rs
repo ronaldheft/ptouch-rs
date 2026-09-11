@@ -168,11 +168,17 @@ pub fn render_document(document: &LabelDocument, target: RenderTarget) -> Result
                 size,
                 error_correction,
                 min_module_size,
+                quiet_zone_modules,
             } => {
                 let x = required_coordinate(*x, "QR code", "x")?;
                 let y = required_coordinate(*y, "QR code", "y")?;
-                let source =
-                    crate::qr::render_qr(content, *error_correction, *size, *min_module_size)?;
+                let source = crate::qr::render_qr_with_quiet_zone(
+                    content,
+                    *error_correction,
+                    *size,
+                    *min_module_size,
+                    *quiet_zone_modules,
+                )?;
                 PositionedElement::Image {
                     source,
                     bounds: ElementBounds {
@@ -380,6 +386,7 @@ fn render_flow_document(document: &LabelDocument, target: RenderTarget) -> Resul
             size,
             error_correction,
             min_module_size,
+            quiet_zone_modules,
             ..
         } = element
         {
@@ -390,7 +397,13 @@ fn render_flow_document(document: &LabelDocument, target: RenderTarget) -> Resul
             }
             // QR size and minimum module size are document-space quantities.
             // Scale the completed binary grid to preserve its physical size.
-            let qr = crate::qr::render_qr(content, *error_correction, *size, *min_module_size)?;
+            let qr = crate::qr::render_qr_with_quiet_zone(
+                content,
+                *error_correction,
+                *size,
+                *min_module_size,
+                *quiet_zone_modules,
+            )?;
             let qr = qr.scale_to_size(
                 scale(*size, document.dpi, target.feed_dpi),
                 scale(*size, document.dpi, target.cross_dpi),
@@ -801,6 +814,7 @@ mod tests {
                 size: 58,
                 error_correction: QrErrorCorrection::Low,
                 min_module_size: 2,
+                quiet_zone_modules: 4,
             }],
         };
         let high_quality = RenderTarget {
@@ -929,6 +943,7 @@ mod tests {
                 size: 58,
                 error_correction: QrErrorCorrection::Low,
                 min_module_size: 2,
+                quiet_zone_modules: 4,
             }],
         };
 
@@ -1008,6 +1023,69 @@ mod tests {
     }
 
     #[test]
+    fn external_quiet_zone_preserves_full_size_qr_at_both_print_qualities() {
+        let text = r#"
+version = 2
+tape_width_mm = 24
+dpi = 180
+layout = "positioned"
+font_name = "Inter"
+font_margin = 0
+flip_h = false
+flip_v = false
+[[elements]]
+type = "qr"
+content = "https://bambuddy.example.com/inventory?spool=23"
+x = 8
+y = 0
+size = 128
+error_correction = "h"
+min_module_size = 3
+quiet_zone_modules = 0
+"#;
+        let document = LabelDocument::from_toml_str(text).unwrap();
+        // Editing/saving must retain the explicit zero rather than defaulting to four.
+        let saved = document.to_toml_string().unwrap();
+        assert!(saved.contains("quiet_zone_modules = 0"));
+        let document = LabelDocument::from_toml_str(&saved).unwrap();
+        for feed_dpi in [180, 360] {
+            let result = render_document(
+                &document,
+                RenderTarget {
+                    tape_width_px: 128,
+                    cross_dpi: 180,
+                    feed_dpi,
+                },
+            )
+            .unwrap();
+            let scale = u32::from(feed_dpi / 180);
+            // Version 6-H: 41 modules, three cross-feed dots each. Centered
+            // in 128 rows, the symbol starts at row 2 and ends at row 124.
+            assert!(result.printer_raster.get_pixel(10 * scale, 2));
+            assert!(result.printer_raster.get_pixel(132 * scale, 2));
+            assert!(!result.printer_raster.get_pixel(10 * scale, 1));
+            assert!(result.printer_raster.get_pixel(10 * scale, 124));
+            assert!(!result.printer_raster.get_pixel(10 * scale, 125));
+            assert!(result.preview.get_pixel(10 * scale, 124 * scale));
+        }
+        let default_zone =
+            LabelDocument::from_toml_str(&text.replace("quiet_zone_modules = 0", "")).unwrap();
+        assert!(
+            render_document(
+                &default_zone,
+                RenderTarget {
+                    tape_width_px: 128,
+                    cross_dpi: 180,
+                    feed_dpi: 360,
+                }
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("147 pixels")
+        );
+    }
+
+    #[test]
     fn positioned_qr_is_generated_semantically_at_each_target_resolution() {
         let document = LabelDocument {
             version: 2,
@@ -1027,6 +1105,7 @@ mod tests {
                 size: 58,
                 error_correction: QrErrorCorrection::Low,
                 min_module_size: 2,
+                quiet_zone_modules: 4,
             }],
         };
         let target = |feed_dpi| RenderTarget {
@@ -1086,6 +1165,7 @@ mod tests {
                 size: 58,
                 error_correction: QrErrorCorrection::Low,
                 min_module_size: 2,
+                quiet_zone_modules: 4,
             }],
         };
 

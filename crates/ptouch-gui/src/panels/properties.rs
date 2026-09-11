@@ -100,6 +100,7 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
             size,
             error_correction,
             min_module_size,
+            quiet_zone_modules,
         } => {
             changed |= show_qr_properties(
                 ui,
@@ -110,6 +111,7 @@ pub fn show_properties(ui: &mut egui::Ui, state: &mut AppState) {
                     size,
                     error_correction,
                     min_module_size,
+                    quiet_zone_modules,
                 },
                 state,
             );
@@ -147,6 +149,7 @@ fn show_qr_properties(ui: &mut egui::Ui, props: QrProps, state: &AppState) -> bo
         size,
         error_correction,
         min_module_size,
+        quiet_zone_modules,
     } = props;
     let mut changed = false;
     ui.label("QR Content:");
@@ -183,6 +186,17 @@ fn show_qr_properties(ui: &mut egui::Ui, props: QrProps, state: &AppState) -> bo
         ui.label("px");
     });
 
+    ui.horizontal(|ui| {
+        ui.label("Quiet zone:");
+        changed |= ui
+            .add(egui::DragValue::new(quiet_zone_modules).range(0..=4))
+            .changed();
+        ui.label("modules");
+    });
+    if *quiet_zone_modules < 4 {
+        ui.label("The surrounding label or blank tape edges must supply the remaining quiet zone.");
+    }
+
     egui::ComboBox::from_label("Error correction")
         .selected_text(error_correction.as_str().to_uppercase())
         .show_ui(ui, |ui| {
@@ -210,6 +224,7 @@ struct QrProps<'a> {
     size: &'a mut u32,
     error_correction: &'a mut QrErrorCorrection,
     min_module_size: &'a mut u32,
+    quiet_zone_modules: &'a mut u32,
 }
 
 /// Mutable references to a text element's editable fields.
