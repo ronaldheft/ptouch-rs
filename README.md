@@ -195,6 +195,17 @@ within that actual raster. An element may end exactly at the printable edge,
 but rendering fails with a layout error if its bottom edge would be clipped.
 High-quality feed-axis scaling does not change this cross-tape limit.
 
+Positioned layouts can opt into `balance_horizontal_margins = true`. After
+rasterization, the shorter horizontal ink-to-edge margin is padded to match
+the longer one. Existing minimum length and end padding remain minimums; no
+content is cropped or rescaled. This is measured from actual ink, including
+font side bearings. The GUI preserves and edits the setting. Target rounding
+can change balanced label length by a feed dot between print qualities.
+PT-P710BT Auto Cut jobs explicitly select symmetric 2 mm feed margins
+(14 standard / 28 high-resolution dots), including chained pages, as documented
+in sections 2.3.3 and ESC i d of Brother's raster reference.
+
+
 Version 2 layouts can generate QR codes directly from literal or templated
 content. `size` is the square logical-pixel canvas, including the required
 four-module quiet zone by default. `quiet_zone_modules = 0..4` controls how much

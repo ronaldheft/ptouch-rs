@@ -274,7 +274,7 @@ pub fn render_document(document: &LabelDocument, target: RenderTarget) -> Result
     let padded_right_edge = right_edge
         .checked_add(document.end_padding)
         .ok_or_else(|| RenderError::Layout("positioned label length is too large".to_string()))?;
-    let logical_width = document.min_length.max(padded_right_edge);
+    let mut logical_width = document.min_length.max(padded_right_edge);
     let mut printer_raster = LabelBitmap::new(
         scale_positioned_edge(logical_width, document.dpi, target.feed_dpi)?,
         target.tape_width_px,
@@ -313,6 +313,18 @@ pub fn render_document(document: &LabelDocument, target: RenderTarget) -> Result
         blit(&mut printer_raster, &image, bounds.x, bounds.y);
     }
 
+    if document.balance_horizontal_margins {
+        let (balanced, shift) = balance_horizontal_margins(&printer_raster)?;
+        printer_raster = balanced;
+        let logical_shift = scale(shift, target.feed_dpi, document.dpi);
+        for element in &mut bounds {
+            element.x = element.x.checked_add(logical_shift).ok_or_else(|| {
+                RenderError::Layout("balanced element position is too large".into())
+            })?;
+        }
+        logical_width = scale(printer_raster.width(), target.feed_dpi, document.dpi);
+    }
+
     if document.flip_h || document.flip_v {
         printer_raster = printer_raster.mirrored(document.flip_h, document.flip_v);
     }
@@ -327,6 +339,28 @@ pub fn render_document(document: &LabelDocument, target: RenderTarget) -> Result
         },
         element_bounds: bounds,
     })
+}
+
+/// Add white columns to the shorter margin. Existing minimum length, element
+/// spacing, and trailing padding are retained; nothing is cropped or scaled.
+fn balance_horizontal_margins(bitmap: &LabelBitmap) -> Result<(LabelBitmap, u32)> {
+    let occupied = |x| (0..bitmap.height()).any(|y| bitmap.get_pixel(x, y));
+    let Some(first) = (0..bitmap.width()).find(|&x| occupied(x)) else {
+        return Ok((bitmap.clone(), 0));
+    };
+    let last = (first..bitmap.width())
+        .rev()
+        .find(|&x| occupied(x))
+        .unwrap();
+    let trailing = bitmap.width() - last - 1;
+    let shift = trailing.saturating_sub(first);
+    let width = bitmap
+        .width()
+        .checked_add(first.abs_diff(trailing))
+        .ok_or_else(|| RenderError::Layout("balanced label width is too large".into()))?;
+    let mut balanced = LabelBitmap::new(width, bitmap.height());
+    blit(&mut balanced, bitmap, shift, 0);
+    Ok((balanced, shift))
 }
 
 fn render_flow_document(document: &LabelDocument, target: RenderTarget) -> Result<RenderedLabel> {
@@ -690,6 +724,7 @@ mod tests {
             layout: LayoutMode::Positioned,
             min_length: 10,
             end_padding: 1,
+            balance_horizontal_margins: false,
             font_name: "sans-serif".to_string(),
             font_margin: 0,
             flip_h: false,
@@ -758,6 +793,7 @@ mod tests {
             layout: LayoutMode::Positioned,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "sans-serif".to_string(),
             font_margin: 0,
             flip_h: false,
@@ -803,6 +839,7 @@ mod tests {
             layout: LayoutMode::Positioned,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "sans-serif".to_string(),
             font_margin: 0,
             flip_h: false,
@@ -851,6 +888,7 @@ mod tests {
             layout: LayoutMode::Positioned,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "sans-serif".to_string(),
             font_margin: 0,
             flip_h: false,
@@ -903,6 +941,7 @@ mod tests {
             layout: LayoutMode::Positioned,
             min_length: 10,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "sans-serif".to_string(),
             font_margin: 0,
             flip_h: false,
@@ -932,6 +971,7 @@ mod tests {
             layout: LayoutMode::Flow,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "sans-serif".to_string(),
             font_margin: 0,
             flip_h: false,
@@ -975,6 +1015,7 @@ mod tests {
             layout: LayoutMode::Positioned,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "sans-serif".to_string(),
             font_margin: 0,
             flip_h: false,
@@ -1020,6 +1061,69 @@ mod tests {
             rendered.preview.get_pixel(127, 128),
             rendered.printer_raster.get_pixel(127, 64)
         );
+    }
+
+    #[test]
+    fn balanced_margins_use_ink_edges_and_preserve_raster_content() {
+        for (width, first, last) in [(20, 2, 14), (20, 5, 17), (20, 3, 16)] {
+            let mut bitmap = LabelBitmap::new(width, 4);
+            bitmap.set_pixel(first, 1, true);
+            bitmap.set_pixel(last, 2, true);
+            let (balanced, shift) = balance_horizontal_margins(&bitmap).unwrap();
+            assert_eq!(first + shift, balanced.width() - last - shift - 1);
+            assert!(balanced.width() >= width);
+            for y in 0..4 {
+                for x in 0..width {
+                    assert_eq!(bitmap.get_pixel(x, y), balanced.get_pixel(x + shift, y));
+                }
+            }
+        }
+        let blank = LabelBitmap::new(20, 4);
+        assert_eq!(balance_horizontal_margins(&blank).unwrap().0.width(), 20);
+    }
+
+    #[test]
+    fn positioned_text_margins_balance_for_short_and_long_values() {
+        for content in ["I", "SUNLU", "A much longer spool brand"] {
+            let text = format!(
+                r#"
+version = 2
+tape_width_mm = 24
+dpi = 180
+layout = "positioned"
+min_length = 80
+end_padding = 12
+balance_horizontal_margins = true
+font_name = "sans-serif"
+font_margin = 0
+[[elements]]
+type = "text"
+content = "{content}"
+x = 10
+y = 0
+font_size = 8
+font_size_unit = "pt"
+"#
+            );
+            let doc = LabelDocument::from_toml_str(&text).unwrap();
+            for feed_dpi in [180, 360] {
+                let rendered = render_document(
+                    &doc,
+                    RenderTarget {
+                        tape_width_px: 128,
+                        cross_dpi: 180,
+                        feed_dpi,
+                    },
+                )
+                .unwrap();
+                let bitmap = &rendered.printer_raster;
+                let occupied = |x| (0..bitmap.height()).any(|y| bitmap.get_pixel(x, y));
+                let first = (0..bitmap.width()).find(|&x| occupied(x)).unwrap();
+                let last = (0..bitmap.width()).rev().find(|&x| occupied(x)).unwrap();
+                assert_eq!(first, bitmap.width() - last - 1);
+                assert!(first >= 12 * u32::from(feed_dpi / 180));
+            }
+        }
     }
 
     #[test]
@@ -1094,6 +1198,7 @@ quiet_zone_modules = 0
             layout: LayoutMode::Positioned,
             min_length: 58,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "sans-serif".to_string(),
             font_margin: 0,
             flip_h: false,
@@ -1154,6 +1259,7 @@ quiet_zone_modules = 0
             layout: LayoutMode::Flow,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "sans-serif".to_string(),
             font_margin: 0,
             flip_h: false,
@@ -1198,6 +1304,7 @@ quiet_zone_modules = 0
             layout: LayoutMode::Positioned,
             min_length: 40,
             end_padding: 3,
+            balance_horizontal_margins: false,
             font_name: "serif".to_string(),
             font_margin: 0,
             flip_h: false,
@@ -1245,6 +1352,7 @@ quiet_zone_modules = 0
             layout: LayoutMode::Positioned,
             min_length: 20,
             end_padding: 3,
+            balance_horizontal_margins: false,
             font_name: "sans-serif".to_string(),
             font_margin: 0,
             flip_h: false,
@@ -1297,6 +1405,7 @@ quiet_zone_modules = 0
             layout: LayoutMode::Flow,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "sans-serif".to_string(),
             font_margin: 0,
             flip_h: false,
@@ -1349,6 +1458,7 @@ quiet_zone_modules = 0
             layout: LayoutMode::Flow,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "sans-serif".to_string(),
             font_margin: 2,
             flip_h: false,

@@ -849,6 +849,7 @@ fn build_label_document(
         layout: LayoutMode::Flow,
         min_length: 0,
         end_padding: 0,
+        balance_horizontal_margins: false,
         font_name: args.font.clone(),
         font_margin: args.margin,
         flip_h: args.flip_h,

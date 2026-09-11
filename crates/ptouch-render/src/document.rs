@@ -96,6 +96,9 @@ pub struct LabelDocument {
     /// Blank space after the rightmost positioned element, in logical pixels.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub end_padding: u32,
+    /// Equalize blank columns before/after actual ink, adding space only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub balance_horizontal_margins: bool,
     /// Font family name used for text elements.
     pub font_name: String,
     /// Font top/bottom margin in pixels.
@@ -983,6 +986,7 @@ mod tests {
             layout: LayoutMode::Flow,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "DejaVuSans".into(),
             font_margin: 2,
             flip_h: false,
@@ -1052,6 +1056,7 @@ mod tests {
             layout: LayoutMode::Flow,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "x".into(),
             font_margin: 0,
             flip_h: false,
@@ -1158,6 +1163,7 @@ elements = []
             layout: LayoutMode::Flow,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "x".into(),
             font_margin: 0,
             flip_h: false,
@@ -1195,6 +1201,7 @@ elements = []
             layout: LayoutMode::Flow,
             min_length: 0,
             end_padding: 0,
+            balance_horizontal_margins: false,
             font_name: "x".into(),
             font_margin: 0,
             flip_h: false,
